@@ -12,6 +12,8 @@ import os
 
 from shopping_agent import ShoppingAgentConfig
 
+from .earn_rates import rates_notes
+
 # The Club policy vocabulary on top of the generic retail lexicon: points, redemptions,
 # vouchers, and tiers all route policy questions through the grounding gate.
 POLICY_INTENT_TERMS = (
@@ -80,7 +82,7 @@ def build_shopping_config() -> ShoppingAgentConfig:
             "when the member wants to spend at least that much. A points budget is a "
             "CP figure, not a cash amount. Recommend and suggest only products a tool "
             "returned this session, by their real title; never name a product or SKU "
-            "the catalog did not return."
+            "the catalog did not return.\n" + rates_notes()
         ),
         policy_intent_terms=POLICY_INTENT_TERMS,
     )
