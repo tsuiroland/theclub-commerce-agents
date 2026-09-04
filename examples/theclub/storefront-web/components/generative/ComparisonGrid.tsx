@@ -4,6 +4,7 @@
 import type { CSSProperties } from "react";
 import { formatMoney } from "web-shared";
 import type { ComparisonPayload } from "@/lib/types";
+import { listOf, stringList } from "@/lib/payload";
 import { ProductImage, ProductTitle, Rating } from "../ProductTile";
 
 const RECOMMENDED_LABEL = "Recommended";
@@ -27,12 +28,15 @@ export default function ComparisonGrid({
   payload: ComparisonPayload;
   partial?: boolean;
 }) {
-  const entries = payload.entries ?? [];
+  const entries = listOf<NonNullable<ComparisonPayload["entries"]>[number]>(payload.entries).filter(
+    (entry) => entry && entry.product
+  );
+  const dimensions = stringList(payload.dimensions);
   const delta = payload.price_delta;
   // Each pro/con line is a subgrid row, padded to the longest list, so the k-th line of
   // every card shares a baseline.
-  const maxPros = Math.max(0, ...entries.map((entry) => (entry.pros ?? []).length));
-  const maxCons = Math.max(0, ...entries.map((entry) => (entry.cons ?? []).length));
+  const maxPros = Math.max(0, ...entries.map((entry) => stringList(entry.pros).length));
+  const maxCons = Math.max(0, ...entries.map((entry) => stringList(entry.cons).length));
   const cardRows = { "--cmp-rows": `span ${2 + maxPros + maxCons}` } as CSSProperties;
   return (
     <section className="rounded-2xl border border-(--line) bg-(--card) p-4 shadow-(--shadow-sm)">
@@ -40,8 +44,8 @@ export default function ComparisonGrid({
       <div className="grid gap-3 sm:grid-cols-2">
         {entries.map((entry) => {
           const recommended = payload.recommended_product_id === entry.product_id;
-          const pros = entry.pros ?? [];
-          const cons = entry.cons ?? [];
+          const pros = stringList(entry.pros);
+          const cons = stringList(entry.cons);
           return (
             <div
               key={entry.product_id}
@@ -104,8 +108,8 @@ export default function ComparisonGrid({
           </span>
         </p>
       ) : null}
-      {payload.dimensions?.length ? (
-        <p className="mt-3 text-xs text-(--ink-soft)/80">Compared on: {payload.dimensions.join(" · ")}</p>
+      {dimensions.length ? (
+        <p className="mt-3 text-xs text-(--ink-soft)/80">Compared on: {dimensions.join(" · ")}</p>
       ) : null}
     </section>
   );
