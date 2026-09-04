@@ -5,11 +5,14 @@
 
     PYTHONPATH=examples .venv/bin/python -m theclub.api.member_check
 
-Reads CLUB_MEMBER_EMAIL and CLUB_MEMBER_PASSWORD from the repo-root .env (or the
-environment), signs in, and reports what the member token unlocks: your name, your
-Clubpoints balance, your cart, your orders, and whether the member-gated Clubpoints
-price comes back on a redemption product. Prints nothing secret: no password, no
-token."""
+Signs in from the repo-root .env (or the environment) one of two ways:
+CLUB_MEMBER_EMAIL + CLUB_MEMBER_PASSWORD (a shop-local password — the Club portal
+SSO password is not the shop's, see the README), or CLUB_MEMBER_TOKEN, a bearer
+harvested from your signed-in browser (Chrome DevTools → Network → a graphql
+request → Request Headers → Authorization: Bearer …). Reports what the member
+token unlocks: your name, your Clubpoints balance, your cart, your orders, and
+whether the member-gated Clubpoints price comes back on a redemption product.
+Prints nothing secret: no password, no token."""
 
 from __future__ import annotations
 
@@ -25,18 +28,21 @@ async def main() -> int:
     load_dotenv(".env")
     email = os.environ.get("CLUB_MEMBER_EMAIL", "")
     password = os.environ.get("CLUB_MEMBER_PASSWORD", "")
-    if not email or not password:
-        print("Set CLUB_MEMBER_EMAIL and CLUB_MEMBER_PASSWORD in .env first.")
+    token = os.environ.get("CLUB_MEMBER_TOKEN", "")
+    if not ((email and password) or token):
+        print("Set CLUB_MEMBER_EMAIL + CLUB_MEMBER_PASSWORD, or CLUB_MEMBER_TOKEN, in .env first.")
         return 1
 
-    catalog = ClubMagentoCatalog(email=email, password=password)
-    print(f"1. signing in as {email} …")
+    catalog = ClubMagentoCatalog(
+        email=email or None, password=password or None, token=token or None
+    )
+    print(f"1. signing in as {email or 'bearer token'} …")
     try:
         await catalog._ensure_token()
     except RuntimeError as error:
         print(f"   sign-in failed: {str(error)[:160]}")
         return 1
-    print("   signed in")
+    print("   signed in" if not token else "   token loaded (first query verifies it)")
 
     from shopping_agent import ShoppingSessionContext
 

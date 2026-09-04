@@ -56,14 +56,16 @@ def live_storefront() -> LiveClubStorefront | None:
     )
     balance = os.environ.get("CLUB_DEMO_CP", "")
     member = os.environ.get("CLUB_MEMBER_EMAIL")
+    token = os.environ.get("CLUB_MEMBER_TOKEN")  # a harvested bearer, SSO-proof login
     return LiveClubStorefront(
         graphql_url=os.environ.get("CLUB_MAGENTO_URL", DEFAULT_GRAPHQL_URL),
         store_code=os.environ.get("CLUB_MAGENTO_STORE", DEFAULT_STORE),
         overlay=AemPriceOverlay(model_urls=models or DEFAULT_MODEL_URLS),
-        demo_tier=None if member else os.environ.get("CLUB_DEMO_TIER"),
-        demo_clubpoints=None if member else (int(balance) if balance.isdigit() else None),
+        demo_tier=None if member or token else os.environ.get("CLUB_DEMO_TIER"),
+        demo_clubpoints=None if member or token else (int(balance) if balance.isdigit() else None),
         email=member,
         password=os.environ.get("CLUB_MEMBER_PASSWORD"),
+        token=token,
     )
 
 

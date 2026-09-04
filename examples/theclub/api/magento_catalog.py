@@ -312,6 +312,7 @@ class ClubMagentoCatalog(StorefrontBackend):
         demo_clubpoints: int | None = None,
         email: str | None = None,
         password: str | None = None,
+        token: str | None = None,
     ) -> None:
         self._client = client or httpx.AsyncClient(timeout=15.0)
         self._graphql_url = graphql_url
@@ -321,7 +322,10 @@ class ClubMagentoCatalog(StorefrontBackend):
         self._demo_clubpoints = demo_clubpoints
         self._email = email
         self._password = password
-        self._token: str | None = None
+        # A harvested bearer token signs the member in directly — the shop's SSO
+        # provisioned accounts carry no local password to log in with (see
+        # member_check); the token rides .env like the credentials do.
+        self._token = token
         self._member_cart_id: str | None = None
         self._profile_cache: tuple[float, dict[str, Any]] | None = None
         # What a cart write or the checkout handoff needs from earlier reads: the
@@ -334,8 +338,13 @@ class ClubMagentoCatalog(StorefrontBackend):
 
     @property
     def member_mode(self) -> bool:
-        """True when the deployment carries the member's own Club credentials."""
-        return self._email is not None and self._password is not None
+        """True when the deployment carries the member's own Club credentials or a
+        harvested member token."""
+        return (self._email is not None and self._password is not None) or self._token is not None
+
+    @property
+    def _member_label(self) -> str:
+        return self._email or "member (bearer token)"
 
     async def _ensure_token(self) -> str | None:
         if not self.member_mode:
@@ -539,7 +548,7 @@ class ClubMagentoCatalog(StorefrontBackend):
         if self.member_mode:
             customer = await self._customer_profile()
             tier, points = self._loyalty(customer)
-            context: dict[str, Any] = {"member": self._email, "signed_in": True}
+            context: dict[str, Any] = {"member": self._member_label, "signed_in": True}
             if tier is not None:
                 context["tier"] = tier
             if points is not None:
@@ -561,7 +570,7 @@ class ClubMagentoCatalog(StorefrontBackend):
             tier, _ = self._loyalty(customer)
             return UserPreferences(
                 user_id=session.user_id,
-                display_name=customer.get("firstname") or self._email,
+                display_name=customer.get("firstname") or self._member_label,
                 loyalty_tier=tier,
                 preferences={"store": self._store_code, "member_email": self._email or ""},
             )

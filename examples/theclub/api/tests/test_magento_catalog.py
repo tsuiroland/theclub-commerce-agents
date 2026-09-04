@@ -733,6 +733,31 @@ async def test_member_cart_runs_on_their_own_quote(
     assert all(auth == "Bearer token-1" for auth in member_shop.seen_auth[first:])
 
 
+@pytest.fixture
+def token_store(member_shop: FakeMemberShop) -> ClubMagentoCatalog:
+    return ClubMagentoCatalog(
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json=member_shop.payload(request))
+            )
+        ),
+        token="token-1",
+    )
+
+
+async def test_token_only_member_mode_never_logs_in(
+    token_store: ClubMagentoCatalog, member_shop: FakeMemberShop, session: ShoppingSessionContext
+) -> None:
+    # A harvested bearer signs the member in directly — no GenerateCustomerToken.
+    assert token_store.member_mode
+    context = await token_store.get_account_context(session)
+    assert context["member"] == "member (bearer token)"
+    assert context["clubpoints_balance"] == "12,345"
+    assert "GenerateCustomerToken" not in member_shop.ops
+    assert member_shop.seen_auth
+    assert all(auth == "Bearer token-1" for auth in member_shop.seen_auth)
+
+
 async def test_member_orders(
     member_store: ClubMagentoCatalog, session: ShoppingSessionContext
 ) -> None:
