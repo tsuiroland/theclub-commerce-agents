@@ -50,17 +50,21 @@ and 繁體中文. The core repo is backend-agnostic; the work below is implement
 
 ## Run
 
-    uvicorn theclub.api.main:app --app-dir examples --reload --port 8000
+Needs `ANTHROPIC_API_KEY` (the environment, repo-root `.env`, or `examples/retail/.env`).
+The one-command console (ACME's storefront-web via symlink on :3004, the API on :8004):
 
-Needs `ANTHROPIC_API_KEY` (repo-root `.env`, or `examples/retail/.env` until Phase 2
-moves env handling into this example). Put the assistant on the live catalog with:
+    CLUB_BACKEND=magento CLUB_DEMO_TIER=gold CLUB_DEMO_CP=10000 \
+      .venv/bin/python scripts/run_demo.py theclub
 
-    CLUB_BACKEND=magento uvicorn theclub.api.main:app --app-dir examples --reload --port 8000
+or the API alone, pointed at a storefront you run yourself:
+
+    CLUB_BACKEND=magento .venv/bin/python -m uvicorn theclub.api.main:app \
+      --app-dir examples --reload --port 8004
     CLUB_MAGENTO_STORE=zh_Hant_HK ...   # 繁體中文 store view
+    CLUB_AEM_MODELS=url1,url2 ...       # more AEM pages to price from
 
-and, to try the member experience while the Phase 2b token is outstanding:
-
-    CLUB_DEMO_TIER=gold CLUB_DEMO_CP=10000
+`CLUB_DEMO_TIER`/`CLUB_DEMO_CP` stand in for the member experience while the Phase 2b
+token is outstanding.
 
 Then ask, in the console's chat, things like *"what can I get for 5,000 Clubpoints?"*
 (a budget search over the AEM tiles), *"Wellcome voucher"* (a budget search narrowed by

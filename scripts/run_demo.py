@@ -51,6 +51,9 @@ VERTICALS: dict[str, dict[str, object]] = {
     "travel": {"api_port": 8001, "store": "ACME Travel"},
     "telecom": {"api_port": 8002, "store": "ACME Mobile"},
     "entertainment": {"api_port": 8003, "store": "ACME Tickets"},
+    # The Club reuses ACME's storefront-web via a symlink until its own console lands;
+    # its assistant reads the live catalog under CLUB_BACKEND=magento.
+    "theclub": {"api_port": 8004, "store": "The Club"},
 }
 
 PYTHON_MODULES = (
