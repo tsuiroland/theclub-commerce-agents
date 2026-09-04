@@ -7,8 +7,9 @@
 
 Reads CLUB_MEMBER_EMAIL and CLUB_MEMBER_PASSWORD from the repo-root .env (or the
 environment), signs in, and reports what the member token unlocks: your name, your
-cart, your orders, and whether the member-gated Clubpoints price comes back on a
-redemption product. Prints nothing secret: no password, no token."""
+Clubpoints balance, your cart, your orders, and whether the member-gated Clubpoints
+price comes back on a redemption product. Prints nothing secret: no password, no
+token."""
 
 from __future__ import annotations
 
@@ -43,6 +44,18 @@ async def main() -> int:
 
     preferences = await catalog.get_preferences(session)
     print(f"2. profile: {preferences.display_name} ({preferences.preferences.get('member_email')})")
+
+    customer = await catalog._customer_profile()
+    tier, points = catalog._loyalty(customer)
+    balance = (customer.get("reward_points") or {}).get("balance") or {}
+    money = balance.get("money") or {}
+    if points is not None:
+        cash = f" (≈ HK${money['value']:,.2f})" if money.get("value") is not None else ""
+        print(f"   loyalty: {points:,} Clubpoints{cash}")
+    else:
+        print("   loyalty: the shop returned no balance for this token")
+    print(f"   customer group id {customer.get('group_id')!r} -> tier {tier!r}")
+    print("   (an unmapped group means TIER_GROUPS in magento_catalog.py needs the id)")
 
     cart = await catalog.get_cart(session)
     print(f"3. your cart: {cart.item_count} item(s), subtotal HK${cart.subtotal}")

@@ -206,6 +206,13 @@ query Customer {
     firstname
     lastname
     email
+    group_id
+    reward_points {
+      balance {
+        points
+        money { value currency }
+      }
+    }
   }
 }
 """
@@ -226,6 +233,16 @@ query CustomerOrders {
   }
 }
 """
+
+# The shop has no tier-named field anywhere (probed: tier/club_tier/loyalty_tier/
+# membership all absent). If tiers map to Magento customer groups, the mapping is
+# pinned here once a signed-in member_check run prints the group id; until then a
+# signed-in member carries their real Clubpoints balance and no tier guess.
+TIER_GROUPS: dict[int, str] = {}
+
+# The member profile — name, customer group, loyalty balance — refreshes lazily, at
+# most this often (the agent never places an order, but the site may between turns).
+PROFILE_TTL_SECONDS = 300.0
 
 
 def _not_wired(system: str, phase: str) -> RuntimeError:
@@ -278,11 +295,12 @@ def _order_status(status: str) -> OrderStatus:
 
 
 class ClubMagentoCatalog(StorefrontBackend):
-    """Reads shop.theclub.com.hk's anonymous GraphQL storefront, its results enriched
-    by the AEM points overlay when one is attached. One async client for the process;
-    every method acts for the session but carries no member token yet — ``demo_tier``
-    and ``demo_clubpoints`` stand in for the member context, clearly named, until the
-    Phase 2b token exists."""
+    """Reads shop.theclub.com.hk's GraphQL storefront, its results enriched by the AEM
+    points overlay when one is attached. One async client for the process. With the
+    member's own credentials the shop's customer token carries their profile, their
+    Clubpoints balance, their cart, and their orders; without it every method acts for
+    the session as a guest, with ``demo_tier`` and ``demo_clubpoints`` standing in for
+    the member context."""
 
     def __init__(
         self,
@@ -305,6 +323,7 @@ class ClubMagentoCatalog(StorefrontBackend):
         self._password = password
         self._token: str | None = None
         self._member_cart_id: str | None = None
+        self._profile_cache: tuple[float, dict[str, Any]] | None = None
         # What a cart write or the checkout handoff needs from earlier reads: the
         # session's guest quote, a variant's family, the product page, the vendor.
         self._carts: dict[str, str] = {}
@@ -330,6 +349,23 @@ class ClubMagentoCatalog(StorefrontBackend):
             self._token = data["generateCustomerToken"]["token"]
             _logger.info("theclub: member signed in (%s)", self._email)
         return self._token
+
+    async def _customer_profile(self) -> dict[str, Any]:
+        """The member's own profile — name, customer group, the loyalty balance the
+        shop's RewardPoints module carries — fetched at most once per few minutes."""
+        now = time.monotonic()
+        if self._profile_cache and now - self._profile_cache[0] < PROFILE_TTL_SECONDS:
+            return self._profile_cache[1]
+        data = await self._query(CUSTOMER_QUERY, {}, "Customer", authed=True)
+        self._profile_cache = (now, data["customer"])
+        return data["customer"]
+
+    @staticmethod
+    def _loyalty(customer: dict[str, Any]) -> tuple[str | None, int | None]:
+        """(tier, Clubpoints balance) from the member profile: the balance exactly as
+        the shop reports it, the tier only when the customer group maps to one."""
+        balance = (customer.get("reward_points") or {}).get("balance") or {}
+        return TIER_GROUPS.get(customer.get("group_id")), balance.get("points")
 
     def _remember(self, products: list[Product]) -> None:
         for product in products:
@@ -497,13 +533,21 @@ class ClubMagentoCatalog(StorefrontBackend):
         return details
 
     async def get_account_context(self, session: ShoppingSessionContext) -> dict[str, Any] | None:
-        # The dynamic context block: the member's own session when signed in, the demo
+        # The dynamic context block: the member's own session when signed in — their
+        # real balance, and their tier once the group mapping is pinned — the demo
         # knobs when not (a guest deployment runs with neither and returns None).
         if self.member_mode:
-            return {"member": self._email, "signed_in": True}
+            customer = await self._customer_profile()
+            tier, points = self._loyalty(customer)
+            context: dict[str, Any] = {"member": self._email, "signed_in": True}
+            if tier is not None:
+                context["tier"] = tier
+            if points is not None:
+                context["clubpoints_balance"] = f"{points:,}"
+            return context
         if self._demo_tier is None and self._demo_clubpoints is None:
             return None
-        context: dict[str, Any] = {"member": "demo stand-in until the member token lands"}
+        context = {"member": "demo stand-in until the member token lands"}
         if self._demo_tier is not None:
             context["tier"] = self._demo_tier
         if self._demo_clubpoints is not None:
@@ -513,11 +557,12 @@ class ClubMagentoCatalog(StorefrontBackend):
     async def get_preferences(self, session: ShoppingSessionContext) -> UserPreferences:
         # Read before every turn; the signed-in member states their own name.
         if self.member_mode:
-            data = await self._query(CUSTOMER_QUERY, {}, "Customer", authed=True)
-            customer = data["customer"]
+            customer = await self._customer_profile()
+            tier, _ = self._loyalty(customer)
             return UserPreferences(
                 user_id=session.user_id,
                 display_name=customer.get("firstname") or self._email,
+                loyalty_tier=tier,
                 preferences={"store": self._store_code, "member_email": self._email or ""},
             )
         return UserPreferences(

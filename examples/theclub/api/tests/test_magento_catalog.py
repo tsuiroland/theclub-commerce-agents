@@ -16,7 +16,7 @@ import pytest
 from shopping_agent import SearchFilters, ShoppingSessionContext, Unavailable
 
 from ..aem_price_overlay import AemPriceOverlay
-from ..magento_catalog import ClubMagentoCatalog
+from ..magento_catalog import TIER_GROUPS, ClubMagentoCatalog
 
 # Captured from the live endpoint (Store: en_US), trimmed to the fields the queries read.
 SEARCH_RESPONSE: dict[str, Any] = {
@@ -601,10 +601,12 @@ class FakeMemberShop(FakeClubShop):
     def __init__(self) -> None:
         super().__init__()
         self.seen_auth: list[str | None] = []
+        self.ops: list[str] = []
 
     def payload(self, request: httpx.Request) -> dict:
         body = json.loads(request.content)
         name, variables = body["operationName"], body.get("variables", {})
+        self.ops.append(name)
         self.seen_auth.append(request.headers.get("Authorization"))
         if name == "GenerateCustomerToken":
             if variables == {"email": "member@theclub.com.hk", "password": "hunter2"}:
@@ -627,6 +629,13 @@ class FakeMemberShop(FakeClubShop):
                         "firstname": "Roland",
                         "lastname": "T",
                         "email": "member@theclub.com.hk",
+                        "group_id": 5,
+                        "reward_points": {
+                            "balance": {
+                                "points": 12345,
+                                "money": {"value": 2469.0, "currency": "HKD"},
+                            }
+                        },
                     }
                 }
             }
@@ -681,7 +690,35 @@ async def test_member_preferences_and_context(
     preferences = await member_store.get_preferences(session)
     assert preferences.display_name == "Roland"
     context = await member_store.get_account_context(session)
-    assert context == {"member": "member@theclub.com.hk", "signed_in": True}
+    # The real balance off the shop's RewardPoints; no tier until the group maps.
+    assert context == {
+        "member": "member@theclub.com.hk",
+        "signed_in": True,
+        "clubpoints_balance": "12,345",
+    }
+    assert preferences.loyalty_tier is None
+
+
+async def test_member_loyalty_tier_maps_from_customer_group(
+    member_store: ClubMagentoCatalog,
+    session: ShoppingSessionContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(TIER_GROUPS, 5, "gold")
+    preferences = await member_store.get_preferences(session)
+    context = await member_store.get_account_context(session)
+    assert preferences.loyalty_tier == "gold"
+    assert context["tier"] == "gold"
+    assert context["clubpoints_balance"] == "12,345"
+
+
+async def test_member_profile_fetch_is_cached(
+    member_store: ClubMagentoCatalog, member_shop: FakeMemberShop, session: ShoppingSessionContext
+) -> None:
+    await member_store.get_account_context(session)
+    await member_store.get_account_context(session)
+    await member_store.get_preferences(session)
+    assert member_shop.ops.count("Customer") == 1
 
 
 async def test_member_cart_runs_on_their_own_quote(
