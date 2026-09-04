@@ -1,30 +1,47 @@
 # Copyright 2026 Anthropic PBC
 # SPDX-License-Identifier: Apache-2.0
 
-"""The Club example API — the 0.1 shell.
+"""The Club example API — the 0.1 shell plus the live Phase 1 catalog.
 
     uvicorn theclub.api.main:app --app-dir examples --reload --port 8000
 
-Until the Magento GraphQL StorefrontBackend lands (Phase 1 of this example's roadmap),
-the app runs on ACME's MockRetail as a stand-in catalog so the console, the The Club
-config, and the shopping-agent skills can be exercised end-to-end. Phase 1 replaces
-``backend`` and moves env handling out of the retail example's directory."""
+The console's storefront chrome (product grid, add-to-cart button) stays on ACME's
+MockRetail until The Club's own cart lands in Phase 3. The assistant's backend is
+``CLUB_BACKEND=magento`` away from the live shop.theclub.com.hk catalog:
+
+    CLUB_BACKEND=magento                       # HKD cash prices, anonymous
+    CLUB_MAGENTO_STORE=zh_Hant_HK              # 繁體中文 catalog, if the members use it
+
+Env resolution (examples/retail/.env) rides along with the mock fixtures until this
+example gets its own data directory."""
 
 from __future__ import annotations
 
+import os
+
 from demo_common import REPO_ROOT, MemorySeeder, build_storefront_host, load_demo_env
 from retail.api.mock_retail import DATA_DIR, MockRetail
+from shopping_agent import StorefrontBackend
 from shopping_agent_runtime import ShoppingAgent
 
 from .agent_config import build_shopping_config
+from .magento_catalog import DEFAULT_GRAPHQL_URL, DEFAULT_STORE, ClubMagentoCatalog
 
-# Placeholder: ACME's fixtures stand in for The Club's catalog. Env resolution
-# (examples/retail/.env) rides along until this example gets its own data directory.
 load_demo_env(DATA_DIR.parent)
 backend = MockRetail()
 
+
+def agent_backend() -> StorefrontBackend:
+    if os.environ.get("CLUB_BACKEND") == "magento":
+        return ClubMagentoCatalog(
+            graphql_url=os.environ.get("CLUB_MAGENTO_URL", DEFAULT_GRAPHQL_URL),
+            store_code=os.environ.get("CLUB_MAGENTO_STORE", DEFAULT_STORE),
+        )
+    return backend  # the stand-in: the same fixtures the console grid shows
+
+
 agent = ShoppingAgent(
-    backend=backend,
+    backend=agent_backend(),
     skills_dir=REPO_ROOT / "shopping-agent" / "skills",
     config=build_shopping_config(),
 )
