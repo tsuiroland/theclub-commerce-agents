@@ -161,6 +161,12 @@ async def test_budget_search_bounds(overlay: AemPriceOverlay) -> None:
     assert await overlay.budget_search(minimum=500) != []
 
 
+async def test_points_vocabulary_narrows_nothing(overlay: AemPriceOverlay) -> None:
+    # "what can I redeem with my clubpoints" is a budget question, not a product name.
+    results = await overlay.budget_search(maximum=5000, text="clubpoints redemption")
+    assert [p.product_id for p in results] == ["CR-WEL-100-26B5"]
+
+
 async def test_failed_page_degrades_to_no_tiles() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500)

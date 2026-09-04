@@ -36,6 +36,22 @@ DEFAULT_MODEL_URLS = ("https://www.theclub.com.hk/shopping/en/lc/clubpoints-zone
 
 _logger: Logger = getLogger("theclub.aem_overlay")
 
+# Words that name the redemption itself; a budget query full of them ("what can I
+# redeem with my clubpoints") is asking for the whole budget range, not a product.
+_POINTS_VOCABULARY = frozenset(
+    {
+        "cp",
+        "clubpoint",
+        "clubpoints",
+        "point",
+        "points",
+        "redeem",
+        "redemption",
+        "reward",
+        "rewards",
+    }
+)
+
 
 def _amount(value: Any) -> float | None:
     """AEM prices are strings with thousands separators; ``None`` when absent."""
@@ -241,8 +257,15 @@ class AemPriceOverlay:
         limit: int = 8,
     ) -> list[Product]:
         """Points-priced tiles a member's budget reaches, dearest first, optionally
-        narrowed to words matching the name, brand, or category."""
-        words = [word for word in (text or "").lower().split() if len(word) > 1]
+        narrowed to words matching the name, brand, category, or type. Points
+        vocabulary ("clubpoints", "redeem", …) narrows nothing — every tile here is a
+        redemption — so it is dropped rather than matched against names that never
+        carry it."""
+        words = [
+            word
+            for word in (text or "").lower().split()
+            if len(word) > 1 and word not in _POINTS_VOCABULARY
+        ]
         matches = []
         for tile in await self.tiles():
             if not tile.cash_points_priced or not tile.in_stock:
@@ -252,7 +275,7 @@ class AemPriceOverlay:
             if minimum is not None and tile.clubpoints < minimum:
                 continue
             haystack = " ".join(
-                part for part in (tile.name, tile.brand, tile.category) if part
+                part for part in (tile.name, tile.brand, tile.category, tile.product_type) if part
             ).lower()
             if words and not any(word in haystack for word in words):
                 continue

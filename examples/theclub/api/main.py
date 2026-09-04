@@ -14,6 +14,8 @@ points overlay attached, and demo member knobs standing in for the member token:
     CLUB_MAGENTO_STORE=zh_Hant_HK              # 繁體中文 catalog, if the members use it
     CLUB_AEM_MODELS=url1,url2                  # more AEM pages to price from
     CLUB_DEMO_TIER=gold CLUB_DEMO_CP=10000     # demo member context (Phase 2b replaces)
+    CLUB_LLM_BASE_URL=http://localhost:8000    # a local Anthropic-protocol endpoint
+    CLUB_LLM_MODEL=its-model-name              #   (key-less; CLUB_LLM_API_KEY if it wants one)
 
 Env resolution (examples/retail/.env) rides along with the mock fixtures until this
 example gets its own data directory."""
@@ -21,6 +23,8 @@ example gets its own data directory."""
 from __future__ import annotations
 
 import os
+
+from anthropic import AsyncAnthropic
 
 from demo_common import REPO_ROOT, MemorySeeder, build_storefront_host, load_demo_env
 from retail.api.mock_retail import DATA_DIR, MockRetail
@@ -53,8 +57,22 @@ def agent_backend() -> StorefrontBackend:
     return backend  # the stand-in: the same fixtures the console grid shows
 
 
+def agent_client() -> AsyncAnthropic | None:
+    """The client for a local endpoint that speaks the Anthropic protocol (streaming,
+    tool use, thinking all verified against it); key-less ones take a stand-in key.
+    None means the SDK's default client, from the environment."""
+    base_url = os.environ.get("CLUB_LLM_BASE_URL")
+    if not base_url:
+        return None
+    return AsyncAnthropic(
+        base_url=base_url,
+        api_key=os.environ.get("CLUB_LLM_API_KEY") or "local-keyless",
+    )
+
+
 agent = ShoppingAgent(
     backend=agent_backend(),
+    client=agent_client(),
     skills_dir=REPO_ROOT / "shopping-agent" / "skills",
     config=build_shopping_config(),
 )

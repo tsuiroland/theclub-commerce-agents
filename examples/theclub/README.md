@@ -66,6 +66,18 @@ or the API alone, pointed at a storefront you run yourself:
 `CLUB_DEMO_TIER`/`CLUB_DEMO_CP` stand in for the member experience while the Phase 2b
 token is outstanding.
 
+### A local LLM
+
+`CLUB_LLM_BASE_URL` points the assistant at a local endpoint that speaks the Anthropic
+Messages protocol (`/v1/messages`, streaming, tool use, thinking — vLLM and LM Studio
+style gateways expose it); key-less servers take a stand-in key. `CLUB_LLM_MODEL` names
+the model the endpoint serves, so the config requests it. The turn loop is chatty — a
+~20KB system prompt, 21 tools, thinking per round — so expect the first budget question
+to take a while on smaller local deployments; a mid-size reasoning model handles the
+tool loop, and smaller ones may need `thinking_effort=None` (`CLUB_LLM_THINKING=0`) or a
+shorter flow set; with thinking off, a budget question on a 27B local deployment ran
+about 4× faster and still presented grounded picks.
+
 Then ask, in the console's chat, things like *"what can I get for 5,000 Clubpoints?"*
 (a budget search over the AEM tiles), *"Wellcome voucher"* (a budget search narrowed by
 words), *"espresso machine"* (Magento text search), or *"show me the Nothing Headphone"* —
