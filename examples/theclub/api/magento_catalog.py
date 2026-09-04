@@ -24,6 +24,7 @@ import html
 import logging
 import re
 import time
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -32,6 +33,8 @@ from shopping_agent import (
     Cart,
     CartItem,
     CheckoutHandoff,
+    Order,
+    OrderStatus,
     Product,
     ProductDetails,
     SearchFilters,
@@ -177,6 +180,53 @@ mutation RemoveItemFromCart($input: RemoveItemFromCartInput!) {
 }
 """
 
+# The member's own account, when one is configured: the shop's customer-token login.
+# The token lives in memory for the process; the password is never logged (see _query)
+# and both arrive only through the local environment.
+GENERATE_TOKEN_MUTATION = """
+mutation GenerateCustomerToken($email: String!, $password: String!) {
+  generateCustomerToken(email: $email, password: $password) {
+    token
+  }
+}
+"""
+
+CUSTOMER_CART_QUERY = """
+query CustomerCart {
+  customerCart {
+    id
+    total_quantity
+  }
+}
+"""
+
+CUSTOMER_QUERY = """
+query Customer {
+  customer {
+    firstname
+    lastname
+    email
+  }
+}
+"""
+
+CUSTOMER_ORDERS_QUERY = """
+query CustomerOrders {
+  customer {
+    orders {
+      items {
+        order_number
+        order_date
+        status
+        total {
+          grand_total { value currency }
+        }
+      }
+    }
+  }
+}
+"""
+
 
 def _not_wired(system: str, phase: str) -> RuntimeError:
     # The executor relays any exception but NotOffered as the tool being temporarily
@@ -212,6 +262,21 @@ def _item_id(uid: str) -> int | None:
         return None
 
 
+def _needs_reauth(errors: list[dict[str, Any]]) -> bool:
+    """Whether an error batch is only the token expiring, worth one fresh sign-in."""
+    text = " ".join(str(error.get("message", "")).lower() for error in errors)
+    category = {str(error.get("extensions", {}).get("category", "")) for error in errors}
+    return "graphql-authorization" in category or "isn't authorized" in text
+
+
+def _order_status(status: str) -> OrderStatus:
+    """The shop's order-status wording onto the enum, processing as the fallback."""
+    for candidate in OrderStatus:
+        if candidate.value == status:
+            return candidate
+    return OrderStatus.PROCESSING
+
+
 class ClubMagentoCatalog(StorefrontBackend):
     """Reads shop.theclub.com.hk's anonymous GraphQL storefront, its results enriched
     by the AEM points overlay when one is attached. One async client for the process;
@@ -227,6 +292,8 @@ class ClubMagentoCatalog(StorefrontBackend):
         overlay: AemPriceOverlay | None = None,
         demo_tier: str | None = None,
         demo_clubpoints: int | None = None,
+        email: str | None = None,
+        password: str | None = None,
     ) -> None:
         self._client = client or httpx.AsyncClient(timeout=15.0)
         self._graphql_url = graphql_url
@@ -234,6 +301,10 @@ class ClubMagentoCatalog(StorefrontBackend):
         self._overlay = overlay
         self._demo_tier = demo_tier
         self._demo_clubpoints = demo_clubpoints
+        self._email = email
+        self._password = password
+        self._token: str | None = None
+        self._member_cart_id: str | None = None
         # What a cart write or the checkout handoff needs from earlier reads: the
         # session's guest quote, a variant's family, the product page, the vendor.
         self._carts: dict[str, str] = {}
@@ -241,6 +312,24 @@ class ClubMagentoCatalog(StorefrontBackend):
         self._variant_parents: dict[str, str] = {}
         self._product_urls: dict[str, str] = {}
         self._vendors: dict[str, str] = {}
+
+    @property
+    def member_mode(self) -> bool:
+        """True when the deployment carries the member's own Club credentials."""
+        return self._email is not None and self._password is not None
+
+    async def _ensure_token(self) -> str | None:
+        if not self.member_mode:
+            return None
+        if self._token is None:
+            data = await self._query(
+                GENERATE_TOKEN_MUTATION,
+                {"email": self._email, "password": self._password},
+                "GenerateCustomerToken",
+            )
+            self._token = data["generateCustomerToken"]["token"]
+            _logger.info("theclub: member signed in (%s)", self._email)
+        return self._token
 
     def _remember(self, products: list[Product]) -> None:
         for product in products:
@@ -257,23 +346,34 @@ class ClubMagentoCatalog(StorefrontBackend):
         return await self._overlay.enrich(product)
 
     async def _query(
-        self, query: str, variables: dict[str, Any], operation_name: str
+        self,
+        query: str,
+        variables: dict[str, Any],
+        operation_name: str,
+        authed: bool = False,
     ) -> dict[str, Any]:
+        token = await self._ensure_token() if authed else None
+        headers = {"Content-Type": "application/json", "Store": self._store_code}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         started = time.monotonic()
         response = await self._client.post(
             self._graphql_url,
             json={"query": query, "variables": variables, "operationName": operation_name},
-            headers={"Content-Type": "application/json", "Store": self._store_code},
+            headers=headers,
         )
         _logger.info(
             "theclub <- Magento GraphQL %s %s (%.0f ms)",
             operation_name,
-            variables,
+            {key: "***" if key == "password" else value for key, value in variables.items()},
             (time.monotonic() - started) * 1000,
         )
         response.raise_for_status()
         body = response.json()
         if body.get("errors"):  # Magento answers 200 with per-field errors
+            if authed and self._token and _needs_reauth(body["errors"]):
+                self._token = None  # expired mid-process: sign in again, once
+                return await self._query(query, variables, operation_name, authed=True)
             raise RuntimeError(f"Magento GraphQL errors: {body['errors']}")
         return body["data"]
 
@@ -397,8 +497,10 @@ class ClubMagentoCatalog(StorefrontBackend):
         return details
 
     async def get_account_context(self, session: ShoppingSessionContext) -> dict[str, Any] | None:
-        # The dynamic context block: what a member's session states until the Phase 2b
-        # token replaces the demo knobs with the real tier and points balance.
+        # The dynamic context block: the member's own session when signed in, the demo
+        # knobs when not (a guest deployment runs with neither and returns None).
+        if self.member_mode:
+            return {"member": self._email, "signed_in": True}
         if self._demo_tier is None and self._demo_clubpoints is None:
             return None
         context: dict[str, Any] = {"member": "demo stand-in until the member token lands"}
@@ -408,29 +510,46 @@ class ClubMagentoCatalog(StorefrontBackend):
             context["clubpoints_balance"] = f"{self._demo_clubpoints:,}"
         return context
 
-    # -- Guest context ------------------------------------------------------------
-
     async def get_preferences(self, session: ShoppingSessionContext) -> UserPreferences:
-        # Read before every turn, so it answers for guests: no member token until
-        # Phase 2b, hence no display name beyond the demo knobs.
+        # Read before every turn; the signed-in member states their own name.
+        if self.member_mode:
+            data = await self._query(CUSTOMER_QUERY, {}, "Customer", authed=True)
+            customer = data["customer"]
+            return UserPreferences(
+                user_id=session.user_id,
+                display_name=customer.get("firstname") or self._email,
+                preferences={"store": self._store_code, "member_email": self._email or ""},
+            )
         return UserPreferences(
             user_id=session.user_id,
             loyalty_tier=self._demo_tier,
             preferences={"store": self._store_code},
         )
 
-    # -- Cart: a real guest quote on the shop, cash lines only -------------------
+    # -- Cart: the member's own quote, or a guest quote on the shop --------------
 
     async def _cart_id(self, session: ShoppingSessionContext) -> str:
         if cart_id := self._carts.get(session.session_id):
+            return cart_id
+        if self.member_mode:
+            # The signed-in member has one cart of their own on the shop.
+            data = await self._query(CUSTOMER_CART_QUERY, {}, "CustomerCart", authed=True)
+            cart_id = data["customerCart"]["id"]
+            self._member_cart_id = cart_id
+            self._carts[session.session_id] = cart_id
             return cart_id
         data = await self._query(CREATE_CART_MUTATION, {}, "CreateEmptyCart")
         cart_id = data["createEmptyCart"]
         self._carts[session.session_id] = cart_id
         return cart_id
 
+    def _authed_cart(self, cart_id: str) -> bool:
+        return cart_id == self._member_cart_id
+
     async def _raw_cart(self, cart_id: str) -> dict[str, Any]:
-        data = await self._query(CART_QUERY, {"id": cart_id}, "Cart")
+        data = await self._query(
+            CART_QUERY, {"id": cart_id}, "Cart", authed=self._authed_cart(cart_id)
+        )
         return data["cart"]
 
     async def _read_cart(self, cart_id: str, raw: dict[str, Any] | None = None) -> Cart:
@@ -479,6 +598,8 @@ class ClubMagentoCatalog(StorefrontBackend):
         return None
 
     async def get_cart(self, session: ShoppingSessionContext) -> Cart:
+        if self.member_mode:
+            return await self._read_cart(await self._cart_id(session))
         if not (cart_id := self._carts.get(session.session_id)):
             return Cart(currency="HKD")
         return await self._read_cart(cart_id)
@@ -486,7 +607,7 @@ class ClubMagentoCatalog(StorefrontBackend):
     async def add_to_cart(
         self, session: ShoppingSessionContext, product_id: str, quantity: int
     ) -> Cart:
-        if product_id.startswith("CR-"):
+        if product_id.startswith("CR-") and not self.member_mode:
             raise Unavailable(
                 f"{product_id} is a Clubpoints redemption: its points price and its "
                 "checkout are member-only. Sign in on shop.theclub.com.hk to redeem it."
@@ -499,7 +620,10 @@ class ClubMagentoCatalog(StorefrontBackend):
         if parent := self._variant_parents.get(product_id):
             item["parent_sku"] = parent  # configurables sell their variants under a family
         data = await self._query(
-            ADD_TO_CART_MUTATION, {"id": cart_id, "items": [item]}, "AddProductsToCart"
+            ADD_TO_CART_MUTATION,
+            {"id": cart_id, "items": [item]},
+            "AddProductsToCart",
+            authed=self._authed_cart(cart_id),
         )
         if errors := data["addProductsToCart"]["user_errors"]:
             raise Unavailable(f"{product_id}: {'; '.join(e['message'] for e in errors)}")
@@ -517,6 +641,7 @@ class ClubMagentoCatalog(StorefrontBackend):
             REMOVE_CART_MUTATION,
             {"input": {"cart_id": cart_id, "cart_item_id": item_id}},
             "RemoveItemFromCart",
+            authed=self._authed_cart(cart_id),
         )
 
     async def update_cart_item(
@@ -535,6 +660,7 @@ class ClubMagentoCatalog(StorefrontBackend):
                     }
                 },
                 "UpdateCartItems",
+                authed=self._authed_cart(cart_id),
             )
             return await self._read_cart(cart_id)
         return await self.get_cart(session)  # not in the cart: leave it as it is
@@ -580,13 +706,37 @@ class ClubMagentoCatalog(StorefrontBackend):
         details = await self.get_product_details(_url_lookup_session, product_id)
         return self._product_urls.get(product_id) if details else None
 
+    # -- Orders: the member's own; a guest has none to read -----------------------
+
+    async def get_orders(self, session: ShoppingSessionContext, limit: int = 5) -> list[Order]:
+        if not self.member_mode:
+            raise _not_wired("order history", "after the member token")
+        # Field names follow the shop's customer-order shape as probed; anything the
+        # shop omits reads as absent rather than failing the whole history.
+        data = await self._query(CUSTOMER_ORDERS_QUERY, {}, "CustomerOrders", authed=True)
+        orders = []
+        for raw in (data["customer"].get("orders") or {}).get("items") or []:
+            total = (raw.get("total") or {}).get("grand_total") or {}
+            orders.append(
+                Order(
+                    order_id=str(raw.get("order_number") or ""),
+                    status=_order_status(str(raw.get("status") or "").lower()),
+                    placed_at=datetime.fromisoformat(
+                        str(raw.get("order_date") or "2026-01-01 00:00:00").replace(" ", "T")
+                    ),
+                    total=float(total.get("value") or 0.0),
+                    currency=total.get("currency") or "HKD",
+                )
+            )
+        return orders[:limit]
+
+    async def get_order(self, session: ShoppingSessionContext, order_id: str) -> Order | None:
+        for order in await self.get_orders(session, limit=20):
+            if order.order_id == order_id:
+                return order
+        return None
+
     # -- Not wired yet ------------------------------------------------------------
-
-    async def get_orders(self, session: ShoppingSessionContext, limit: int = 5):
-        raise _not_wired("order history", "after the member token")
-
-    async def get_order(self, session: ShoppingSessionContext, order_id: str):
-        raise _not_wired("order history", "after the member token")
 
     async def search_policies(self, session: ShoppingSessionContext, query: str):
         raise _not_wired("policy library", "later")

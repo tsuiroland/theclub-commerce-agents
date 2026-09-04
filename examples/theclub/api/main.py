@@ -61,8 +61,14 @@ def agent_backend() -> StorefrontBackend:
             graphql_url=os.environ.get("CLUB_MAGENTO_URL", DEFAULT_GRAPHQL_URL),
             store_code=os.environ.get("CLUB_MAGENTO_STORE", DEFAULT_STORE),
             overlay=AemPriceOverlay(model_urls=models or DEFAULT_MODEL_URLS),
-            demo_tier=os.environ.get("CLUB_DEMO_TIER"),
-            demo_clubpoints=int(balance) if balance.isdigit() else None,
+            demo_tier=None
+            if os.environ.get("CLUB_MEMBER_EMAIL")
+            else os.environ.get("CLUB_DEMO_TIER"),  # the real member replaces the demo one
+            demo_clubpoints=None
+            if os.environ.get("CLUB_MEMBER_EMAIL")
+            else (int(balance) if balance.isdigit() else None),
+            email=os.environ.get("CLUB_MEMBER_EMAIL"),
+            password=os.environ.get("CLUB_MEMBER_PASSWORD"),
         )
     return backend  # the stand-in: the same fixtures the console grid shows
 

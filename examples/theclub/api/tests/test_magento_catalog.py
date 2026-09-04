@@ -588,3 +588,147 @@ async def test_checkout_handoff_empty_cart(
     store: ClubMagentoCatalog, session: ShoppingSessionContext
 ) -> None:
     assert await store.checkout_handoff(session, Cart(currency="HKD")) == []
+
+
+# -- The member's own account (Phase 2b) ---------------------------------------------------
+
+
+class FakeMemberShop(FakeClubShop):
+    """The token-gated behavior the live endpoint showed: login by email+password, the
+    member's own cart behind the bearer token, their profile and orders. Cart
+    operations fall through to the guest fake once the member cart is the active one."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen_auth: list[str | None] = []
+
+    def payload(self, request: httpx.Request) -> dict:
+        body = json.loads(request.content)
+        name, variables = body["operationName"], body.get("variables", {})
+        self.seen_auth.append(request.headers.get("Authorization"))
+        if name == "GenerateCustomerToken":
+            if variables == {"email": "member@theclub.com.hk", "password": "hunter2"}:
+                return {"data": {"generateCustomerToken": {"token": "token-1"}}}
+            return {
+                "errors": [
+                    {
+                        "message": "Invalid email address.",
+                        "extensions": {"category": "graphql-authentication"},
+                    }
+                ]
+            }
+        if name == "CustomerCart":
+            self.cart_id = "member-cart-1"  # the member cart becomes the active quote
+            return {"data": {"customerCart": {"id": self.cart_id, "total_quantity": 0}}}
+        if name == "Customer":
+            return {
+                "data": {
+                    "customer": {
+                        "firstname": "Roland",
+                        "lastname": "T",
+                        "email": "member@theclub.com.hk",
+                    }
+                }
+            }
+        if name == "CustomerOrders":
+            return {
+                "data": {
+                    "customer": {
+                        "orders": {
+                            "items": [
+                                {
+                                    "order_number": "100020001",
+                                    "order_date": "2026-08-30 10:00:00",
+                                    "status": "shipped",
+                                    "total": {"grand_total": {"value": 736.0, "currency": "HKD"}},
+                                },
+                                {
+                                    "order_number": "100019002",
+                                    "order_date": "2026-07-01 09:00:00",
+                                    "status": "complete",
+                                    "total": {"grand_total": {"value": 1799.0, "currency": "HKD"}},
+                                },
+                            ]
+                        }
+                    }
+                }
+            }
+        return super().payload(request)
+
+
+@pytest.fixture
+def member_shop() -> FakeMemberShop:
+    return FakeMemberShop()
+
+
+@pytest.fixture
+def member_store(member_shop: FakeMemberShop) -> ClubMagentoCatalog:
+    return ClubMagentoCatalog(
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json=member_shop.payload(request))
+            )
+        ),
+        email="member@theclub.com.hk",
+        password="hunter2",
+    )
+
+
+async def test_member_preferences_and_context(
+    member_store: ClubMagentoCatalog, session: ShoppingSessionContext
+) -> None:
+    assert member_store.member_mode
+    preferences = await member_store.get_preferences(session)
+    assert preferences.display_name == "Roland"
+    context = await member_store.get_account_context(session)
+    assert context == {"member": "member@theclub.com.hk", "signed_in": True}
+
+
+async def test_member_cart_runs_on_their_own_quote(
+    member_store: ClubMagentoCatalog, member_shop: FakeMemberShop, session: ShoppingSessionContext
+) -> None:
+    assert await member_store.get_product_details(session, "Clicks_16PM")
+    cart = await member_store.add_to_cart(session, "4188051", 1)
+    assert [(i.product_id, i.quantity) for i in cart.items] == [("4188051", 1)]
+    # From the first tokened request onward — login and the public detail read precede
+    # it — every request carries the member's bearer token.
+    first = member_shop.seen_auth.index("Bearer token-1")
+    assert all(auth == "Bearer token-1" for auth in member_shop.seen_auth[first:])
+
+
+async def test_member_orders(
+    member_store: ClubMagentoCatalog, session: ShoppingSessionContext
+) -> None:
+    orders = await member_store.get_orders(session)
+    assert [order.order_id for order in orders] == ["100020001", "100019002"]
+    assert orders[0].status.value == "shipped"
+    assert orders[0].total == 736.0
+    one = await member_store.get_order(session, "100019002")
+    assert one is not None and one.total == 1799.0
+
+
+async def test_member_may_add_a_redemption(
+    member_store: ClubMagentoCatalog,
+    member_shop: FakeMemberShop,
+    session: ShoppingSessionContext,
+) -> None:
+    cart = await member_store.add_to_cart(session, "CR-WEL-100-26B5", 1)  # not refused signed in
+    assert member_shop.added == [{"sku": "CR-WEL-100-26B5", "quantity": 1}]
+    assert cart.items == []  # the fake still prices it 0 for the guest-style quote: phantom-dropped
+
+
+async def test_password_never_logged(
+    member_store: ClubMagentoCatalog, session: ShoppingSessionContext
+) -> None:
+    import logging
+
+    records: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: records.append(record.getMessage())
+    logger = logging.getLogger("theclub.magento")
+    logger.addHandler(handler)
+    try:
+        await member_store.get_preferences(session)
+    finally:
+        logger.removeHandler(handler)
+    assert not any("hunter2" in message for message in records)
