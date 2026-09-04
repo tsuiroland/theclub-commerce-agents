@@ -13,8 +13,9 @@ from typing import Any
 import httpx
 import pytest
 
-from shopping_agent import ShoppingSessionContext
+from shopping_agent import SearchFilters, ShoppingSessionContext
 
+from ..aem_price_overlay import AemPriceOverlay
 from ..magento_catalog import ClubMagentoCatalog
 
 # Captured from the live endpoint (Store: en_US), trimmed to the fields the queries read.
@@ -264,3 +265,129 @@ def test_default_endpoint_points_at_the_club() -> None:
     from ..magento_catalog import DEFAULT_GRAPHQL_URL
 
     assert DEFAULT_GRAPHQL_URL == "https://shop.theclub.com.hk/graphql"
+
+
+# -- The Phase 2 overlay, through the catalog --------------------------------------------
+
+OVERLAY_MODEL = {
+    ":items": {
+        "root": {
+            ":items": {
+                "grid": {
+                    ":items": {
+                        "tile": {
+                            "sku": "NothingHP1",
+                            "name": "Nothing Headphone (1)",
+                            "brandLabel": "Nothing",
+                            "inStock": True,
+                            "priceDisplay": {
+                                "crossedPrice": {"cp": None, "hkd": "2299.0"},
+                                "finalPrice": {"cp": "5000", "hkd": None},
+                            },
+                            "minClubPoints": 5000,
+                            "originalPrice": 2299.0,
+                            "extraClubPoints": 300,
+                            "subCat1": "Rewards",
+                            "rewardsOrShopping": "Rewards",
+                            "vendorName": "digilife",
+                        },
+                        "voucher": {
+                            "sku": "CR-WEL-100-26B5",
+                            "name": "Wellcome - HK$100 E-Shopping Voucher",
+                            "inStock": True,
+                            "priceDisplay": {
+                                "crossedPrice": {"cp": None, "hkd": "100.0"},
+                                "finalPrice": {"cp": "690", "hkd": None},
+                            },
+                            "minClubPoints": 690,
+                            "rewardsOrShopping": "Rewards",
+                            "subCat1": "Rewards",
+                        },
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+@pytest.fixture
+def overlaid(requests: list[httpx.Request]) -> ClubMagentoCatalog:
+    def graphql(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        name = json.loads(request.content)["operationName"]
+        body = SEARCH_RESPONSE if name == "SearchProducts" else EMPTY_RESPONSE
+        return httpx.Response(200, json=body)
+
+    def aem(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=OVERLAY_MODEL)
+
+    return ClubMagentoCatalog(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(graphql)),
+        overlay=AemPriceOverlay(client=httpx.AsyncClient(transport=httpx.MockTransport(aem))),
+    )
+
+
+async def test_search_results_carry_the_points_price(
+    overlaid: ClubMagentoCatalog, session: ShoppingSessionContext
+) -> None:
+    products = await overlaid.search_products(session, "headphone")
+    headphone = products[0]
+    assert headphone.price == 5000.0  # the overlay's CP price leads
+    assert headphone.currency == "CP"
+    assert headphone.attributes["cash_price_hkd"] == "2299"
+    assert headphone.attributes["earn_clubpoints"] == "300"
+    assert headphone.attributes["vendor"] == "digilife"
+
+
+async def test_points_budget_search_answers_from_the_overlay(
+    overlaid: ClubMagentoCatalog, requests: list[httpx.Request], session: ShoppingSessionContext
+) -> None:
+    results = await overlaid.search_products(
+        session,
+        "rewards",  # the distilled term, per the config's search notes
+        SearchFilters(attributes={"clubpoints_max": "5000"}),
+        limit=4,
+    )
+    assert [p.product_id for p in results] == ["NothingHP1", "CR-WEL-100-26B5"]  # dearest first
+    assert all(p.currency == "CP" for p in results)
+    assert requests == []  # the tiles price in CP; Magento was never asked
+
+
+async def test_points_budget_search_narrows_by_text(
+    overlaid: ClubMagentoCatalog, session: ShoppingSessionContext
+) -> None:
+    results = await overlaid.search_products(
+        session,
+        "voucher",
+        SearchFilters(attributes={"clubpoints_max": "5000"}),
+    )
+    assert [p.product_id for p in results] == ["CR-WEL-100-26B5"]
+
+
+async def test_budget_without_overlay_still_searches_text(
+    backend: ClubMagentoCatalog, requests: list[httpx.Request], session: ShoppingSessionContext
+) -> None:
+    results = await backend.search_products(
+        session, "keyboard", SearchFilters(attributes={"clubpoints_max": "5000"})
+    )
+    assert len(results) == 3  # fell back to Magento text search, as before
+
+
+async def test_demo_member_context() -> None:
+    def graphql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=EMPTY_RESPONSE)
+
+    session = ShoppingSessionContext(session_id="s", user_id="u")
+    catalog = ClubMagentoCatalog(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(graphql)),
+        demo_tier="gold",
+        demo_clubpoints=10000,
+    )
+    context = await catalog.get_account_context(session)
+    assert context == {
+        "member": "demo stand-in until the member token lands",
+        "tier": "gold",
+        "clubpoints_balance": "10,000",
+    }
+    assert (await catalog.get_preferences(session)).loyalty_tier == "gold"

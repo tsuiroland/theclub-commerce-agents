@@ -62,9 +62,12 @@ def build_shopping_config() -> ShoppingAgentConfig:
         domain_search_notes=(
             "Every product carries dual pricing: an HKD cash price and/or a Clubpoints "
             "(CP) redemption price, and some offers are exclusive to a member tier "
-            "(blue, silver, gold, platinum, black). Members often search by points "
-            "budget — treat a CP figure such as '10,000 points' as the budget to spend, "
-            "not a cash amount, and show what that budget redeems."
+            "(blue, silver, gold, platinum, black). A points-priced product's price is "
+            "in CP with its cash equivalent in attributes.cash_price_hkd; a cash "
+            "product's price is HKD, sometimes with attributes.earn_clubpoints on top. "
+            "Members often search by points budget — pass it as the filter attributes "
+            "clubpoints_min and clubpoints_max (plain numbers), and treat a CP figure "
+            "such as '10,000 points' as the budget to spend, not a cash amount."
         ),
         policy_intent_terms=POLICY_INTENT_TERMS,
     )

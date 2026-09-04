@@ -1,19 +1,21 @@
 # Copyright 2026 Anthropic PBC
 # SPDX-License-Identifier: Apache-2.0
 
-"""The Club's live read-only catalog over shop.theclub.com.hk's Magento GraphQL — Phase 1
-of this example's roadmap. Search and product details are wired; The Club's other
-systems exist but are not wired yet, so those methods raise and their tools answer that
-they are temporarily unavailable (the config keeps their switches on, per the backend
-contract).
+"""The Club's live read-only catalog over shop.theclub.com.hk's Magento GraphQL — Phases
+1 and 2a of this example's roadmap. Search and product details are wired, with
+Clubpoints pricing overlaid from The Club's AEM shopping pages (aem_price_overlay.py)
+so a points-priced product leads with its CP price and a points-budget search answers
+from the tiles. The Club's other systems exist but are not wired yet, so those methods
+raise and their tools answer that they are temporarily unavailable (the config keeps
+their switches on, per the backend contract).
 
 Anonymous GraphQL serves the HKD cash price only: Clubpoints redemption prices are
-member-gated in Magento and arrive in Phase 2 with the member token. The Club's AEM
-shopping pages carry them anonymously, but only for pages AEM has merchandised, so this
-backend takes ``clubpoints`` from Magento when it is served and flags pure-redemption
-items (observed convention: ``CR-`` SKU prefix, HKD final price of 0) with a price note
-the assistant can state plainly. Search filters beyond free text (category, price
-ranges) are Phase 1.5; ``sort`` and rating filters are ignored here."""
+member-gated in Magento and arrive with the member token (Phase 2b). Until then the
+overlay's price stands, ``clubpoints`` from Magento is taken when served, and
+pure-redemption items the overlay does not cover (observed convention: ``CR-`` SKU
+prefix, HKD final price of 0) carry a price note the assistant can state plainly.
+Text search plus the clubpoints_min/clubpoints_max filter dimensions are served;
+other filters and sorts are ignored here."""
 
 from __future__ import annotations
 
@@ -31,6 +33,8 @@ from shopping_agent import (
     StorefrontBackend,
     UserPreferences,
 )
+
+from .aem_price_overlay import AemPriceOverlay
 
 DEFAULT_GRAPHQL_URL = "https://shop.theclub.com.hk/graphql"
 DEFAULT_STORE = "en_US"
@@ -117,6 +121,17 @@ def _not_wired(system: str, phase: str) -> RuntimeError:
     return RuntimeError(f"The Club's {system} is not wired yet ({phase})")
 
 
+def _points_bound(value: str | None) -> float | None:
+    """A clubpoints_min/clubpoints_max attribute as a number, None when absent."""
+    if value is None:
+        return None
+    try:
+        points = float(str(value).replace(",", ""))
+    except ValueError:
+        return None
+    return points if points > 0 else None
+
+
 def _text(fragment: str | None) -> str | None:
     """Magento serves prose as HTML; the model reads plain fenced text."""
     if not fragment:
@@ -125,18 +140,32 @@ def _text(fragment: str | None) -> str | None:
 
 
 class ClubMagentoCatalog(StorefrontBackend):
-    """Reads shop.theclub.com.hk's anonymous GraphQL storefront. One async client for
-    the process; every method acts for the session but carries no member token yet."""
+    """Reads shop.theclub.com.hk's anonymous GraphQL storefront, its results enriched
+    by the AEM points overlay when one is attached. One async client for the process;
+    every method acts for the session but carries no member token yet — ``demo_tier``
+    and ``demo_clubpoints`` stand in for the member context, clearly named, until the
+    Phase 2b token exists."""
 
     def __init__(
         self,
         graphql_url: str = DEFAULT_GRAPHQL_URL,
         store_code: str = DEFAULT_STORE,
         client: httpx.AsyncClient | None = None,
+        overlay: AemPriceOverlay | None = None,
+        demo_tier: str | None = None,
+        demo_clubpoints: int | None = None,
     ) -> None:
         self._client = client or httpx.AsyncClient(timeout=15.0)
         self._graphql_url = graphql_url
         self._store_code = store_code
+        self._overlay = overlay
+        self._demo_tier = demo_tier
+        self._demo_clubpoints = demo_clubpoints
+
+    async def _enrich(self, product: Product) -> Product:
+        if self._overlay is None:
+            return product
+        return await self._overlay.enrich(product)
 
     async def _query(
         self, query: str, variables: dict[str, Any], operation_name: str
@@ -226,8 +255,17 @@ class ClubMagentoCatalog(StorefrontBackend):
         filters: SearchFilters | None = None,
         limit: int = 8,
     ) -> list[Product]:
+        attributes = (filters.attributes if filters else None) or {}
+        maximum = _points_bound(attributes.get("clubpoints_max"))
+        minimum = _points_bound(attributes.get("clubpoints_min"))
+        if (maximum is not None or minimum is not None) and self._overlay is not None:
+            # A points-budget question: the tiles price in CP, so they answer it whole.
+            return await self._overlay.budget_search(
+                maximum=maximum, minimum=minimum, text=query, limit=limit
+            )
         data = await self._query(SEARCH_QUERY, {"q": query, "limit": limit}, "SearchProducts")
-        return [self._summary(item) for item in data["products"]["items"]]
+        products = [self._summary(item) for item in data["products"]["items"]]
+        return [await self._enrich(product) for product in products]
 
     async def get_product_details(
         self, session: ShoppingSessionContext, product_id: str
@@ -238,7 +276,7 @@ class ClubMagentoCatalog(StorefrontBackend):
         if not items:
             return None
         item = items[0]
-        summary = self._summary(item)
+        summary = await self._enrich(self._summary(item))
         details = ProductDetails(
             **summary.model_dump()
             | {
@@ -249,16 +287,33 @@ class ClubMagentoCatalog(StorefrontBackend):
             }
         )
         details.variants = [
-            self._variant(details, variant) for variant in item.get("variants") or []
+            await self._enrich(self._variant(details, variant))
+            for variant in item.get("variants") or []
         ]
         return details
+
+    async def get_account_context(self, session: ShoppingSessionContext) -> dict[str, Any] | None:
+        # The dynamic context block: what a member's session states until the Phase 2b
+        # token replaces the demo knobs with the real tier and points balance.
+        if self._demo_tier is None and self._demo_clubpoints is None:
+            return None
+        context: dict[str, Any] = {"member": "demo stand-in until the member token lands"}
+        if self._demo_tier is not None:
+            context["tier"] = self._demo_tier
+        if self._demo_clubpoints is not None:
+            context["clubpoints_balance"] = f"{self._demo_clubpoints:,}"
+        return context
 
     # -- Guest context ------------------------------------------------------------
 
     async def get_preferences(self, session: ShoppingSessionContext) -> UserPreferences:
         # Read before every turn, so it answers for guests: no member token until
-        # Phase 2, hence no display name, tier, or points balance to state.
-        return UserPreferences(user_id=session.user_id, preferences={"store": self._store_code})
+        # Phase 2b, hence no display name beyond the demo knobs.
+        return UserPreferences(
+            user_id=session.user_id,
+            loyalty_tier=self._demo_tier,
+            preferences={"store": self._store_code},
+        )
 
     # -- Not wired yet ------------------------------------------------------------
 

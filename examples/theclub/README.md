@@ -1,8 +1,10 @@
 # The Club (`theclub.com.hk`) deployment example
 
-Status: **0.1, Phase 1 shipped** — the The Club agent config, a runnable console, and
-the live read-only catalog over `shop.theclub.com.hk`'s Magento GraphQL. Cart, orders,
-policies, fulfillment, and member identity are not wired yet.
+Status: **0.1, Phases 1 and 2a shipped** — the The Club agent config, a runnable
+console, the live read-only catalog over `shop.theclub.com.hk`'s Magento GraphQL, and
+Clubpoints pricing overlaid from The Club's AEM shopping pages, with points-budget
+search and demo member context. Cart, orders, policies, fulfillment, and the real
+member token (Phase 2b) are not wired yet.
 
 The Club's transactional surface is `shop.theclub.com.hk` (Magento, GraphQL; the main
 site is an AEM content portal), selling in dual currencies — HKD cash and Clubpoints
@@ -22,16 +24,27 @@ and 繁體中文. The core repo is backend-agnostic; the work below is implement
   (observed `CR-` SKU convention, HKD 0) carry a price note saying the points price
   shows after member login. Every unwired system answers that it is temporarily
   unavailable — its switch stays on per the backend contract.
+- `api/aem_price_overlay.py` — `AemPriceOverlay`: the Clubpoints prices The Club's AEM
+  shopping pages publish anonymously in their page models, indexed by sku (lazily
+  loaded, per-page TTL, degraded gracefully when a page fails). The catalog merges a
+  tile into its Magento result — a points-priced product leads with its CP price, cash
+  items gain `earn_clubpoints` and vendor — and a `clubpoints_min`/`clubpoints_max`
+  filter answers a points-budget search straight from the tiles, dearest first.
+  Coverage is the merchandised pages, not the catalog; the member-gated Magento price
+  (Phase 2b) remains the source of truth once a session carries a token.
 - `api/main.py` — runnable console API. The console chrome stays on ACME's `MockRetail`;
   the assistant's backend switches to the live catalog with `CLUB_BACKEND=magento`
-  (`CLUB_MAGENTO_URL`, `CLUB_MAGENTO_STORE` to override endpoint and store view).
+  (`CLUB_MAGENTO_URL`, `CLUB_MAGENTO_STORE` to override endpoint and store view;
+  `CLUB_AEM_MODELS` to widen overlay coverage; `CLUB_DEMO_TIER`/`CLUB_DEMO_CP` demo
+  member context standing in for the Phase 2b member token).
 
 ## Roadmap
 
 | Phase | Scope |
 | --- | --- |
 | 1 ✅ | Search + product details over Magento GraphQL (read-only; HKD pricing live, CP price member-gated) |
-| 2 | Member identity: tier + CP balance; personalized, points-budget search (AEM page models carry anonymous dual pricing as an interim source) |
+| 2a ✅ | Clubpoints pricing via the AEM page-model overlay; points-budget search; demo member context (`CLUB_DEMO_TIER`, `CLUB_DEMO_CP`) |
+| 2b | The member token: real tier + CP balance from the member-gated Magento price and the loyalty service, replacing the overlay's stand-in and the demo knobs |
 | 3 | Cart + checkout handoff to Magento hosted checkout — never an autonomous purchase |
 | 4 | Points earn/convert advisory (HKT bills, Citi ThankYou, Shell/Esso, Marriott Bonvoy, KrisFlyer) |
 
@@ -44,3 +57,13 @@ moves env handling into this example). Put the assistant on the live catalog wit
 
     CLUB_BACKEND=magento uvicorn theclub.api.main:app --app-dir examples --reload --port 8000
     CLUB_MAGENTO_STORE=zh_Hant_HK ...   # 繁體中文 store view
+
+and, to try the member experience while the Phase 2b token is outstanding:
+
+    CLUB_DEMO_TIER=gold CLUB_DEMO_CP=10000
+
+Then ask, in the console's chat, things like *"what can I get for 5,000 Clubpoints?"*
+(a budget search over the AEM tiles), *"Wellcome voucher"* (a budget search narrowed by
+words), *"espresso machine"* (Magento text search), or *"show me the Nothing Headphone"* —
+the overlay prices it in CP when a tile carries it. The console's own product grid and
+cart button still run ACME's mock fixtures; only the assistant reads The Club.
