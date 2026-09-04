@@ -1,40 +1,37 @@
 # Copyright 2026 Anthropic PBC
 # SPDX-License-Identifier: Apache-2.0
 
-"""The Club example API — the live catalog (Phase 1) under the points overlay (Phase 2a).
+"""The Club example API — the live Club under every surface of the console.
 
-    uvicorn theclub.api.main:app --app-dir examples --reload --port 8000
+    uvicorn theclub.api.main:app --app-dir examples --reload --port 8004
 
-The console's storefront chrome (product grid, add-to-cart button) stays on ACME's
-MockRetail until The Club's own cart lands in Phase 3. The assistant's backend is
-``CLUB_BACKEND=magento`` away from the live shop.theclub.com.hk catalog with the AEM
-points overlay attached, and demo member knobs standing in for the member token:
-
-    CLUB_BACKEND=magento                       # live catalog + points overlay
-    CLUB_MAGENTO_STORE=zh_Hant_HK              # 繁體中文 catalog, if the members use it
-    CLUB_AEM_MODELS=url1,url2                  # more AEM pages to price from
-    CLUB_DEMO_TIER=gold CLUB_DEMO_CP=10000     # demo member context (Phase 2b replaces)
-    CLUB_LLM_BASE_URL=http://localhost:8000    # a local Anthropic-protocol endpoint
-    CLUB_LLM_MODEL=its-model-name              #   (key-less; CLUB_LLM_API_KEY if it wants one)
-
-Env resolution (examples/retail/.env) rides along with the mock fixtures until this
-example gets its own data directory."""
+Under ``CLUB_BACKEND=magento`` the console itself reads The Club: the grid lists the
+AEM tiles' merchandised feed plus a page of cash results, the cart drawer and the add
+button write the shop's own quote, and the chat runs on the same catalog with the
+points overlay. Without it, ACME's MockRetail stands in as before. The member's own
+account (``CLUB_MEMBER_EMAIL``/``CLUB_MEMBER_PASSWORD``) signs the shop's customer
+token in for cart, profile, and orders; the demo tier and balance stand in only for
+guests. Env resolution rides along with the retail example's .env until this example
+gets its own data directory."""
 
 from __future__ import annotations
 
 import logging
 import os
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 from anthropic import AsyncAnthropic
+from fastapi import FastAPI
 
 from demo_common import REPO_ROOT, MemorySeeder, build_storefront_host, load_demo_env
 from retail.api.mock_retail import DATA_DIR, MockRetail
-from shopping_agent import StorefrontBackend
 from shopping_agent_runtime import ShoppingAgent
 
-from .aem_price_overlay import DEFAULT_MODEL_URLS, AemPriceOverlay
 from .agent_config import build_shopping_config
-from .magento_catalog import DEFAULT_GRAPHQL_URL, DEFAULT_STORE, ClubMagentoCatalog
+from .aem_price_overlay import DEFAULT_MODEL_URLS, AemPriceOverlay
+from .live_storefront import LiveClubStorefront
+from .magento_catalog import DEFAULT_GRAPHQL_URL, DEFAULT_STORE
 
 load_demo_env(DATA_DIR.parent)
 
@@ -46,31 +43,31 @@ if os.environ.get("CLUB_TRACE") != "0" and not _trace.handlers:
     _trace.addHandler(logging.StreamHandler())
     _trace.setLevel(logging.INFO)
 
-backend = MockRetail()
+live_mode = os.environ.get("CLUB_BACKEND") == "magento"
 
 
-def agent_backend() -> StorefrontBackend:
-    if os.environ.get("CLUB_BACKEND") == "magento":
-        models = tuple(
-            url.strip()
-            for url in os.environ.get("CLUB_AEM_MODELS", ",".join(DEFAULT_MODEL_URLS)).split(",")
-            if url.strip()
-        )
-        balance = os.environ.get("CLUB_DEMO_CP", "")
-        return ClubMagentoCatalog(
-            graphql_url=os.environ.get("CLUB_MAGENTO_URL", DEFAULT_GRAPHQL_URL),
-            store_code=os.environ.get("CLUB_MAGENTO_STORE", DEFAULT_STORE),
-            overlay=AemPriceOverlay(model_urls=models or DEFAULT_MODEL_URLS),
-            demo_tier=None
-            if os.environ.get("CLUB_MEMBER_EMAIL")
-            else os.environ.get("CLUB_DEMO_TIER"),  # the real member replaces the demo one
-            demo_clubpoints=None
-            if os.environ.get("CLUB_MEMBER_EMAIL")
-            else (int(balance) if balance.isdigit() else None),
-            email=os.environ.get("CLUB_MEMBER_EMAIL"),
-            password=os.environ.get("CLUB_MEMBER_PASSWORD"),
-        )
-    return backend  # the stand-in: the same fixtures the console grid shows
+def live_storefront() -> LiveClubStorefront | None:
+    if not live_mode:
+        return None
+    models = tuple(
+        url.strip()
+        for url in os.environ.get("CLUB_AEM_MODELS", ",".join(DEFAULT_MODEL_URLS)).split(",")
+        if url.strip()
+    )
+    balance = os.environ.get("CLUB_DEMO_CP", "")
+    member = os.environ.get("CLUB_MEMBER_EMAIL")
+    return LiveClubStorefront(
+        graphql_url=os.environ.get("CLUB_MAGENTO_URL", DEFAULT_GRAPHQL_URL),
+        store_code=os.environ.get("CLUB_MAGENTO_STORE", DEFAULT_STORE),
+        overlay=AemPriceOverlay(model_urls=models or DEFAULT_MODEL_URLS),
+        demo_tier=None if member else os.environ.get("CLUB_DEMO_TIER"),
+        demo_clubpoints=None if member else (int(balance) if balance.isdigit() else None),
+        email=member,
+        password=os.environ.get("CLUB_MEMBER_PASSWORD"),
+    )
+
+
+backend = live_storefront() or MockRetail()
 
 
 def agent_client() -> AsyncAnthropic | None:
@@ -87,19 +84,33 @@ def agent_client() -> AsyncAnthropic | None:
 
 
 agent = ShoppingAgent(
-    backend=agent_backend(),
+    backend=backend,
     client=agent_client(),
     skills_dir=REPO_ROOT / "shopping-agent" / "skills",
     config=build_shopping_config(),
 )
 
 host = build_storefront_host(
-    title="The Club demo API (0.1)",
+    title="The Club demo API",
     example_root=DATA_DIR.parent,
-    backend=backend,
+    backend=backend,  # type: ignore[arg-type]  # LiveClubStorefront serves both roles
     agent=agent,
+    # ACME's seeded memories suit the mock; the live Club brings no Priya with it.
     memory_seeder=MemorySeeder(
-        DATA_DIR / "memory-seed.json", marker=DATA_DIR / ".memory-seeded.json"
+        DATA_DIR / ("memory-seed.json" if not live_mode else "no-memory-seed.json"),
+        marker=None if live_mode else DATA_DIR / ".memory-seeded.json",
     ),
 )
 app = host.app
+_original_lifespan = app.router.lifespan_context
+
+
+@asynccontextmanager
+async def _lifespan(fastapi: FastAPI) -> AsyncIterator[None]:
+    async with _original_lifespan(fastapi):
+        if isinstance(backend, LiveClubStorefront):
+            await backend.load_feed()  # the grid reads The Club from the first request
+        yield
+
+
+app.router.lifespan_context = _lifespan

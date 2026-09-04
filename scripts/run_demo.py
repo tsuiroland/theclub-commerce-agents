@@ -51,14 +51,9 @@ VERTICALS: dict[str, dict[str, object]] = {
     "travel": {"api_port": 8001, "store": "ACME Travel"},
     "telecom": {"api_port": 8002, "store": "ACME Mobile"},
     "entertainment": {"api_port": 8003, "store": "ACME Tickets"},
-    # The Club serves ACME's storefront-web until its own console lands (a symlink
-    # would double-match the */storefront-web workspace glob and break npm ci);
-    # its assistant reads the live catalog under CLUB_BACKEND=magento.
-    "theclub": {
-        "api_port": 8004,
-        "store": "The Club",
-        "web_dir": "retail/storefront-web",
-    },
+    # The Club's own console: the storefront-web re-themed to the Club identity,
+    # reading the live catalog under CLUB_BACKEND=magento.
+    "theclub": {"api_port": 8004, "store": "The Club"},
 }
 
 PYTHON_MODULES = (

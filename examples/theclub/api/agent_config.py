@@ -78,7 +78,9 @@ def build_shopping_config() -> ShoppingAgentConfig:
             "attribute clubpoints_max (a plain number: the cap to spend under, so "
             "'10,000 points' means clubpoints_max=10000), and use clubpoints_min only "
             "when the member wants to spend at least that much. A points budget is a "
-            "CP figure, not a cash amount."
+            "CP figure, not a cash amount. Recommend and suggest only products a tool "
+            "returned this session, by their real title; never name a product or SKU "
+            "the catalog did not return."
         ),
         policy_intent_terms=POLICY_INTENT_TERMS,
     )

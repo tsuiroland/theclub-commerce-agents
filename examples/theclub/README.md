@@ -1,11 +1,13 @@
 # The Club (`theclub.com.hk`) deployment example
 
-Status: **0.1, Phases 1, 2a, and 3 shipped** — the The Club agent config, a runnable
-console, the live catalog over `shop.theclub.com.hk`'s Magento GraphQL, Clubpoints
-pricing overlaid from The Club's AEM shopping pages with points-budget search and demo
-member context, and a real guest cart on the shop with a checkout handoff to the site
-itself. Orders, policies, fulfillment, and the real member token (Phase 2b) are not
-wired yet.
+Status: **0.1, Phases 1, 2a, 2b, and 3 shipped** — the live catalog over
+`shop.theclub.com.hk`'s Magento GraphQL with Clubpoints pricing overlaid and
+points-budget search, the member's own Club account signed in through the shop's
+customer token, a real cart on the shop with a checkout handoff to the site itself,
+and a console of its own — The Club's near-black and Club-pink identity, its grid,
+cart drawer, and add button all reading The Club. Policies and fulfillment are not
+wired yet, and the tier/points balance stays a demo stand-in until the loyalty
+service is reached.
 
 The Club's transactional surface is `shop.theclub.com.hk` (Magento, GraphQL; the main
 site is an AEM content portal), selling in dual currencies — HKD cash and Clubpoints
@@ -40,11 +42,15 @@ and 繁體中文. The core repo is backend-agnostic; the work below is implement
   filter answers a points-budget search straight from the tiles, dearest first.
   Coverage is the merchandised pages, not the catalog; the member-gated Magento price
   (Phase 2b) remains the source of truth once a session carries a token.
-- `api/main.py` — runnable console API. The console chrome stays on ACME's `MockRetail`;
-  the assistant's backend switches to the live catalog with `CLUB_BACKEND=magento`
-  (`CLUB_MAGENTO_URL`, `CLUB_MAGENTO_STORE` to override endpoint and store view;
-  `CLUB_AEM_MODELS` to widen overlay coverage; `CLUB_DEMO_TIER`/`CLUB_DEMO_CP` demo
-  member context standing in for the Phase 2b member token).
+- `api/live_storefront.py` — `LiveClubStorefront`: the live catalog dressed as the
+  console's storefront, so the grid (seeded from the AEM tiles plus a page of cash
+  results), the cart drawer, and the add button all read The Club under
+  `CLUB_BACKEND=magento` (`CLUB_MAGENTO_URL`, `CLUB_MAGENTO_STORE` to override
+  endpoint and store view; `CLUB_AEM_MODELS` to widen overlay coverage). Without it,
+  ACME's `MockRetail` stands in as the demo.
+- `storefront-web/` — The Club's own console: the shared storefront re-themed to the
+  Club identity taken from theclub.com.hk's stylesheet (near-black `#1a1a1a` ink,
+  Club pink `#ee315e` accents), serving the live feed.
 
 ## Roadmap
 
@@ -52,7 +58,7 @@ and 繁體中文. The core repo is backend-agnostic; the work below is implement
 | --- | --- |
 | 1 ✅ | Search + product details over Magento GraphQL (read-only; HKD pricing live, CP price member-gated) |
 | 2a ✅ | Clubpoints pricing via the AEM page-model overlay; points-budget search; demo member context (`CLUB_DEMO_TIER`, `CLUB_DEMO_CP`) |
-| 2b | The member token: real tier + CP balance from the member-gated Magento price and the loyalty service, replacing the overlay's stand-in and the demo knobs |
+| 2b ✅ | The member's own login (`CLUB_MEMBER_EMAIL`/`CLUB_MEMBER_PASSWORD`, local .env only): the shop's customer token rides cart, profile, and order history; the tier/CP balance from the loyalty service is the remaining stand-in |
 | 3 ✅ | A real guest cart on the shop (add a variant under its family, update, remove), cash lines only — a Clubpoints redemption is refused for guests (its price is member-only) — and `checkout` hands off to the site's sign-in page plus each line's product page, never placing an order |
 | 4 | Points earn/convert advisory (HKT bills, Citi ThankYou, Shell/Esso, Marriott Bonvoy, KrisFlyer) |
 
@@ -77,10 +83,10 @@ components, text) is `POST /api/chat`'s SSE body, watchable with:
 ## Run
 
 Needs `ANTHROPIC_API_KEY` (the environment, repo-root `.env`, or `examples/retail/.env`).
-The one-command console (ACME's storefront-web on :3004, the API on :8004):
+The one-command console (The Club storefront on :3004, the API on :8004) — everything
+in `.env` already:
 
-    CLUB_BACKEND=magento CLUB_DEMO_TIER=gold CLUB_DEMO_CP=10000 \
-      .venv/bin/python scripts/run_demo.py theclub
+    .venv/bin/python scripts/run_demo.py theclub
 
 or the API alone, pointed at a storefront you run yourself:
 
@@ -89,13 +95,28 @@ or the API alone, pointed at a storefront you run yourself:
     CLUB_MAGENTO_STORE=zh_Hant_HK ...   # 繁體中文 store view
     CLUB_AEM_MODELS=url1,url2 ...       # more AEM pages to price from
 
-`CLUB_DEMO_TIER`/`CLUB_DEMO_CP` stand in for the member experience while the Phase 2b
-token is outstanding. In the chat, *"add the Clicks keyboard, Spice color"* writes the
-shop's real guest quote (watch the `theclub <- AddProductsToCart` trace), *"make it
-one"* and *"remove it"* update and remove it, and *"check out"* stages a summary whose
-buttons open the site — while a points redemption (*"redeem the Wellcome voucher"*) is
-answered with the honest member-only message. The console's own cart drawer still
-shows the mock fixtures; the live cart lives in the chat panel and the trace lines.
+In the chat, *"add the Clicks keyboard, Spice color"* writes the shop's real quote
+(watch the `theclub <- AddProductsToCart` trace), *"make it one"* and *"remove it"*
+update and remove it, and *"check out"* stages a summary whose buttons open the site.
+The grid, the cart drawer, and the add button read the same live feed.
+
+### Your own Club account
+
+Sign the assistant in as yourself (guest mode answers as no one, and a points
+redemption is refused with the honest member-only message):
+
+    # .env — never committed, never logged
+    CLUB_MEMBER_EMAIL=you@example.com
+    CLUB_MEMBER_PASSWORD=your-password
+
+Your cart, your profile, and your order history then run on the shop's customer
+token (refreshed once when it expires). Check the whole member surface first:
+
+    PYTHONPATH=examples .venv/bin/python -m theclub.api.member_check
+
+It prints your name, cart, and recent orders — and whether the shop serves the
+member-gated Clubpoints field to the token — and no secrets. `CLUB_DEMO_TIER` /
+`CLUB_DEMO_CP` stand in for tier and balance only while signed out.
 
 ### A local LLM
 
@@ -112,5 +133,5 @@ about 4× faster and still presented grounded picks.
 Then ask, in the console's chat, things like *"what can I get for 5,000 Clubpoints?"*
 (a budget search over the AEM tiles), *"Wellcome voucher"* (a budget search narrowed by
 words), *"espresso machine"* (Magento text search), or *"show me the Nothing Headphone"* —
-the overlay prices it in CP when a tile carries it. The console's own product grid and
-cart button still run ACME's mock fixtures; only the assistant reads The Club.
+the overlay prices it in CP when a tile carries it. Recommendations and suggestion
+chips name only products a tool returned this session, by their real titles.
