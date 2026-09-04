@@ -48,6 +48,24 @@ and 繁體中文. The core repo is backend-agnostic; the work below is implement
 | 3 | Cart + checkout handoff to Magento hosted checkout — never an autonomous purchase |
 | 4 | Points earn/convert advisory (HKT bills, Citi ThankYou, Shell/Esso, Marriott Bonvoy, KrisFlyer) |
 
+## Watching it work
+
+The agent does not browse the site: its tools call two server-side surfaces —
+`shop.theclub.com.hk/graphql` (Magento catalog) and The Club's AEM shopping page models
+(Clubpoints prices) — and every fetch prints a `theclub <-` line in the API's console
+(`CLUB_TRACE=0` to silence):
+
+    theclub <- AEM https://www.theclub.com.hk/shopping/en/lc/clubpoints-zone.model.json (313 tiles, 313 points-priced)
+    theclub <- Magento GraphQL SearchProducts {'q': 'headphone', 'limit': 8} (1329 ms)
+
+The rest of the picture: the console shows the working labels ("Looking for items…")
+and the product cards — their images are hosted on shop.theclub.com.hk, live proof of
+where the data came from — and the raw event stream (tool calls with their inputs,
+components, text) is `POST /api/chat`'s SSE body, watchable with:
+
+    curl -N -X POST http://localhost:8004/api/chat -H "content-type: application/json" \
+      -H "cookie: <the console's session cookie>" -d '{"message": "Wellcome voucher"}'
+
 ## Run
 
 Needs `ANTHROPIC_API_KEY` (the environment, repo-root `.env`, or `examples/retail/.env`).

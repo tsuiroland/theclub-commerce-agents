@@ -20,7 +20,9 @@ other filters and sorts are ignored here."""
 from __future__ import annotations
 
 import html
+import logging
 import re
+import time
 from typing import Any
 
 import httpx
@@ -35,6 +37,8 @@ from shopping_agent import (
 )
 
 from .aem_price_overlay import AemPriceOverlay
+
+_logger = logging.getLogger("theclub.magento")
 
 DEFAULT_GRAPHQL_URL = "https://shop.theclub.com.hk/graphql"
 DEFAULT_STORE = "en_US"
@@ -170,10 +174,17 @@ class ClubMagentoCatalog(StorefrontBackend):
     async def _query(
         self, query: str, variables: dict[str, Any], operation_name: str
     ) -> dict[str, Any]:
+        started = time.monotonic()
         response = await self._client.post(
             self._graphql_url,
             json={"query": query, "variables": variables, "operationName": operation_name},
             headers={"Content-Type": "application/json", "Store": self._store_code},
+        )
+        _logger.info(
+            "theclub <- Magento GraphQL %s %s (%.0f ms)",
+            operation_name,
+            variables,
+            (time.monotonic() - started) * 1000,
         )
         response.raise_for_status()
         body = response.json()

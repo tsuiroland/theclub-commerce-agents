@@ -218,6 +218,13 @@ class AemPriceOverlay:
             if tile := _tile(node):
                 page.tiles[tile.sku] = tile
         page.loaded_at = self._clock()
+        points = sum(1 for tile in page.tiles.values() if tile.cash_points_priced)
+        _logger.info(
+            "theclub <- AEM %s (%d tiles, %d points-priced)",
+            page.url,
+            len(page.tiles),
+            points,
+        )
 
     async def tiles(self) -> list[Tile]:
         """Every tile of every page, refreshed as their TTLs lapse."""

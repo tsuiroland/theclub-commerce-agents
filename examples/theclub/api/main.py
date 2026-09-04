@@ -22,6 +22,7 @@ example gets its own data directory."""
 
 from __future__ import annotations
 
+import logging
 import os
 
 from anthropic import AsyncAnthropic
@@ -36,6 +37,15 @@ from .agent_config import build_shopping_config
 from .magento_catalog import DEFAULT_GRAPHQL_URL, DEFAULT_STORE, ClubMagentoCatalog
 
 load_demo_env(DATA_DIR.parent)
+
+# Every fetch of the live Club surfaces prints a "theclub <-" line (GraphQL queries,
+# AEM price pages), so a running console answers where its answers come from. Silence
+# with CLUB_TRACE=0.
+_trace = logging.getLogger("theclub")
+if os.environ.get("CLUB_TRACE") != "0" and not _trace.handlers:
+    _trace.addHandler(logging.StreamHandler())
+    _trace.setLevel(logging.INFO)
+
 backend = MockRetail()
 
 
