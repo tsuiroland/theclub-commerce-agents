@@ -19,6 +19,7 @@ other filters and sorts are ignored here."""
 
 from __future__ import annotations
 
+import base64
 import html
 import logging
 import re
@@ -28,11 +29,15 @@ from typing import Any
 import httpx
 
 from shopping_agent import (
+    Cart,
+    CartItem,
+    CheckoutHandoff,
     Product,
     ProductDetails,
     SearchFilters,
     ShoppingSessionContext,
     StorefrontBackend,
+    Unavailable,
     UserPreferences,
 )
 
@@ -40,8 +45,14 @@ from .aem_price_overlay import AemPriceOverlay
 
 _logger = logging.getLogger("theclub.magento")
 
+# The checkout handoff may need a product page the turn never read; this context is
+# only for that catalog lookup — it carries no member identity either way.
+_url_lookup_session = ShoppingSessionContext(session_id="url-lookup", user_id="catalog")
+
 DEFAULT_GRAPHQL_URL = "https://shop.theclub.com.hk/graphql"
 DEFAULT_STORE = "en_US"
+SHOP_BASE = "https://shop.theclub.com.hk"
+CART_PAGE_URL = f"{SHOP_BASE}/checkout/cart/"
 
 SEARCH_QUERY = """
 query SearchProducts($q: String!, $limit: Int!) {
@@ -49,6 +60,7 @@ query SearchProducts($q: String!, $limit: Int!) {
     items {
       sku
       name
+      url_key
       stock_status
       clubpoints
       small_image { url }
@@ -117,6 +129,54 @@ query ProductDetail($sku: String!) {
 _TAGS = re.compile(r"<[^>]+>")
 _WHITESPACE = re.compile(r"\s+")
 
+# The guest cart, a real quote on the shop: created per session, priced in HKD cash.
+# A member-priced redemption (a CR- line at 0) is a phantom in a guest cart and is
+# refused at add time and dropped on read.
+CREATE_CART_MUTATION = "mutation CreateEmptyCart { createEmptyCart }"
+
+CART_QUERY = """
+query Cart($id: String!) {
+  cart(cart_id: $id) {
+    total_quantity
+    prices { grand_total { value currency } }
+    items {
+      uid
+      product { sku name }
+      quantity
+      prices {
+        price { value currency }
+        row_total { value currency }
+      }
+    }
+  }
+}
+"""
+
+ADD_TO_CART_MUTATION = """
+mutation AddProductsToCart($id: String!, $items: [CartItemInput!]!) {
+  addProductsToCart(cartId: $id, cartItems: $items) {
+    user_errors { code message }
+    cart { total_quantity }
+  }
+}
+"""
+
+UPDATE_CART_MUTATION = """
+mutation UpdateCartItems($input: UpdateCartItemsInput!) {
+  updateCartItems(input: $input) {
+    cart { total_quantity }
+  }
+}
+"""
+
+REMOVE_CART_MUTATION = """
+mutation RemoveItemFromCart($input: RemoveItemFromCartInput!) {
+  removeItemFromCart(input: $input) {
+    cart { total_quantity }
+  }
+}
+"""
+
 
 def _not_wired(system: str, phase: str) -> RuntimeError:
     # The executor relays any exception but NotOffered as the tool being temporarily
@@ -143,6 +203,15 @@ def _text(fragment: str | None) -> str | None:
     return _WHITESPACE.sub(" ", html.unescape(_TAGS.sub(" ", fragment))).strip() or None
 
 
+def _item_id(uid: str) -> int | None:
+    """The shop's line uid is its quote-item id base64-encoded; its update and remove
+    mutations take the raw integer."""
+    try:
+        return int(base64.b64decode(uid).decode())
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
 class ClubMagentoCatalog(StorefrontBackend):
     """Reads shop.theclub.com.hk's anonymous GraphQL storefront, its results enriched
     by the AEM points overlay when one is attached. One async client for the process;
@@ -165,6 +234,22 @@ class ClubMagentoCatalog(StorefrontBackend):
         self._overlay = overlay
         self._demo_tier = demo_tier
         self._demo_clubpoints = demo_clubpoints
+        # What a cart write or the checkout handoff needs from earlier reads: the
+        # session's guest quote, a variant's family, the product page, the vendor.
+        self._carts: dict[str, str] = {}
+        self._cart_lines: dict[str, dict[str, str]] = {}  # quote -> written id -> line uid
+        self._variant_parents: dict[str, str] = {}
+        self._product_urls: dict[str, str] = {}
+        self._vendors: dict[str, str] = {}
+
+    def _remember(self, products: list[Product]) -> None:
+        for product in products:
+            if url := product.attributes.get("url"):
+                self._product_urls[product.product_id] = url
+            if vendor := product.attributes.get("vendor"):
+                self._vendors[product.product_id] = vendor
+            if product.variant_of:
+                self._variant_parents[product.product_id] = product.variant_of
 
     async def _enrich(self, product: Product) -> Product:
         if self._overlay is None:
@@ -225,6 +310,9 @@ class ClubMagentoCatalog(StorefrontBackend):
     def _summary(self, item: dict[str, Any]) -> Product:
         variants = item.get("variants") or []
         price, currency = self._price(item)
+        attributes = self._attributes(item)
+        if url_key := item.get("url_key"):
+            attributes["url"] = f"{SHOP_BASE}/{url_key}"
         return Product(
             product_id=item["sku"],
             title=item["name"],
@@ -239,7 +327,7 @@ class ClubMagentoCatalog(StorefrontBackend):
             ),
             short_description=_text((item.get("short_description") or {}).get("html")),
             options=self._options(variants),
-            attributes=self._attributes(item),
+            attributes=attributes,
         )
 
     def _variant(self, family: Product, variant: dict[str, Any]) -> Product:
@@ -271,12 +359,16 @@ class ClubMagentoCatalog(StorefrontBackend):
         minimum = _points_bound(attributes.get("clubpoints_min"))
         if (maximum is not None or minimum is not None) and self._overlay is not None:
             # A points-budget question: the tiles price in CP, so they answer it whole.
-            return await self._overlay.budget_search(
+            products = await self._overlay.budget_search(
                 maximum=maximum, minimum=minimum, text=query, limit=limit
             )
+            self._remember(products)
+            return products
         data = await self._query(SEARCH_QUERY, {"q": query, "limit": limit}, "SearchProducts")
         products = [self._summary(item) for item in data["products"]["items"]]
-        return [await self._enrich(product) for product in products]
+        products = [await self._enrich(product) for product in products]
+        self._remember(products)
+        return products
 
     async def get_product_details(
         self, session: ShoppingSessionContext, product_id: str
@@ -301,6 +393,7 @@ class ClubMagentoCatalog(StorefrontBackend):
             await self._enrich(self._variant(details, variant))
             for variant in item.get("variants") or []
         ]
+        self._remember([details, *details.variants])
         return details
 
     async def get_account_context(self, session: ShoppingSessionContext) -> dict[str, Any] | None:
@@ -326,32 +419,179 @@ class ClubMagentoCatalog(StorefrontBackend):
             preferences={"store": self._store_code},
         )
 
-    # -- Not wired yet ------------------------------------------------------------
+    # -- Cart: a real guest quote on the shop, cash lines only -------------------
 
-    async def get_cart(self, session: ShoppingSessionContext):
-        raise _not_wired("cart", "Phase 3")
+    async def _cart_id(self, session: ShoppingSessionContext) -> str:
+        if cart_id := self._carts.get(session.session_id):
+            return cart_id
+        data = await self._query(CREATE_CART_MUTATION, {}, "CreateEmptyCart")
+        cart_id = data["createEmptyCart"]
+        self._carts[session.session_id] = cart_id
+        return cart_id
 
-    async def add_to_cart(self, session: ShoppingSessionContext, product_id: str, quantity: int):
-        raise _not_wired("cart", "Phase 3")
+    async def _raw_cart(self, cart_id: str) -> dict[str, Any]:
+        data = await self._query(CART_QUERY, {"id": cart_id}, "Cart")
+        return data["cart"]
+
+    async def _read_cart(self, cart_id: str, raw: dict[str, Any] | None = None) -> Cart:
+        raw = raw if raw is not None else await self._raw_cart(cart_id)
+        # The shop's cart lines name a configurable by its family and expose no child
+        # identity (their schema strips it), so the ids the model writes are tracked
+        # against line uids by the adds that put them there.
+        mapping = self._cart_lines.setdefault(cart_id, {})
+        live = {line["uid"] for line in raw["items"]}
+        for ours, uid in list(mapping.items()):
+            if uid not in live:
+                del mapping[ours]  # the line left; its id is unmapped
+        items: list[CartItem] = []
+        phantom: list[tuple[str, str]] = []
+        for line in raw["items"]:
+            sku = (
+                next((ours for ours, uid in mapping.items() if uid == line["uid"]), None)
+                or line["product"]["sku"]
+            )
+            if float(line["prices"]["price"]["value"]) == 0.0 and sku.startswith("CR-"):
+                # A redemption the guest cannot price: a phantom line, not an offer.
+                phantom.append((line["uid"], sku))
+                continue
+            items.append(
+                CartItem(
+                    product_id=sku,
+                    title=line["product"]["name"],
+                    price=float(line["prices"]["price"]["value"]),
+                    quantity=int(line["quantity"]),
+                )
+            )
+        for uid, sku in phantom:
+            _logger.info("theclub: dropping member-priced redemption %s from the guest cart", sku)
+            if item_id := _item_id(uid):
+                await self._remove_line(cart_id, item_id)
+        return Cart(items=items, currency="HKD")
+
+    async def _line_uid(self, cart_id: str, product_id: str) -> str | None:
+        mapping = self._cart_lines.get(cart_id, {})
+        if uid := mapping.get(product_id):
+            return uid
+        raw = await self._raw_cart(cart_id)
+        for line in raw["items"]:  # simple products: the line names them itself
+            if line["product"]["sku"] == product_id and line["uid"] not in mapping.values():
+                return line["uid"]
+        return None
+
+    async def get_cart(self, session: ShoppingSessionContext) -> Cart:
+        if not (cart_id := self._carts.get(session.session_id)):
+            return Cart(currency="HKD")
+        return await self._read_cart(cart_id)
+
+    async def add_to_cart(
+        self, session: ShoppingSessionContext, product_id: str, quantity: int
+    ) -> Cart:
+        if product_id.startswith("CR-"):
+            raise Unavailable(
+                f"{product_id} is a Clubpoints redemption: its points price and its "
+                "checkout are member-only. Sign in on shop.theclub.com.hk to redeem it."
+            )
+        cart_id = await self._cart_id(session)
+        before = {
+            line["uid"]: int(line["quantity"]) for line in (await self._raw_cart(cart_id))["items"]
+        }
+        item: dict[str, Any] = {"sku": product_id, "quantity": quantity}
+        if parent := self._variant_parents.get(product_id):
+            item["parent_sku"] = parent  # configurables sell their variants under a family
+        data = await self._query(
+            ADD_TO_CART_MUTATION, {"id": cart_id, "items": [item]}, "AddProductsToCart"
+        )
+        if errors := data["addProductsToCart"]["user_errors"]:
+            raise Unavailable(f"{product_id}: {'; '.join(e['message'] for e in errors)}")
+        # Whichever line appeared or grew is the one just added; name it by the id written.
+        after = await self._raw_cart(cart_id)
+        mapping = self._cart_lines.setdefault(cart_id, {})
+        for line in after["items"]:
+            grew = line["uid"] not in before or int(line["quantity"]) > before.get(line["uid"], 0)
+            if grew and line["uid"] not in mapping.values():
+                mapping[product_id] = line["uid"]
+        return await self._read_cart(cart_id, after)
+
+    async def _remove_line(self, cart_id: str, item_id: int) -> None:
+        await self._query(
+            REMOVE_CART_MUTATION,
+            {"input": {"cart_id": cart_id, "cart_item_id": item_id}},
+            "RemoveItemFromCart",
+        )
 
     async def update_cart_item(
         self, session: ShoppingSessionContext, product_id: str, quantity: int
-    ):
-        raise _not_wired("cart", "Phase 3")
+    ) -> Cart:
+        cart_id = self._carts.get(session.session_id)
+        uid = await self._line_uid(cart_id, product_id) if cart_id else None
+        item_id = _item_id(uid) if uid else None
+        if cart_id and item_id:
+            await self._query(
+                UPDATE_CART_MUTATION,
+                {
+                    "input": {
+                        "cart_id": cart_id,
+                        "cart_items": [{"cart_item_id": item_id, "quantity": quantity}],
+                    }
+                },
+                "UpdateCartItems",
+            )
+            return await self._read_cart(cart_id)
+        return await self.get_cart(session)  # not in the cart: leave it as it is
 
-    async def remove_from_cart(self, session: ShoppingSessionContext, product_id: str):
-        raise _not_wired("cart", "Phase 3")
+    async def remove_from_cart(self, session: ShoppingSessionContext, product_id: str) -> Cart:
+        cart_id = self._carts.get(session.session_id)
+        uid = await self._line_uid(cart_id, product_id) if cart_id else None
+        item_id = _item_id(uid) if uid else None
+        if cart_id and item_id:
+            await self._remove_line(cart_id, item_id)
+            self._cart_lines.get(cart_id, {}).pop(product_id, None)
+            return await self._read_cart(cart_id)
+        return await self.get_cart(session)
+
+    async def checkout_handoff(
+        self, session: ShoppingSessionContext, cart: Cart
+    ) -> list[CheckoutHandoff]:
+        """Where the staged cart is completed: the site itself, never this agent. The
+        member's browser cannot resume this server-side guest quote (a different
+        session), so the handoff is the shop's sign-in page plus each line's own
+        product page — the vendor split where the vendor is known."""
+        if not cart.items:
+            return []
+        handoffs = [CheckoutHandoff(url=CART_PAGE_URL, label="Sign in on The Club")]
+        for item in cart.items:
+            if url := await self._product_url(item.product_id):
+                handoffs.append(
+                    CheckoutHandoff(
+                        url=url,
+                        label=f"Buy {item.title[:40]}",
+                        seller=self._vendors.get(item.product_id),
+                    )
+                )
+        return handoffs[:9]
+
+    async def _product_url(self, product_id: str) -> str | None:
+        if url := self._product_urls.get(product_id):
+            return url
+        # A variant's page is its family's page in this catalog.
+        family = self._variant_parents.get(product_id)
+        if family and (url := self._product_urls.get(family)):
+            return url
+        details = await self.get_product_details(_url_lookup_session, product_id)
+        return self._product_urls.get(product_id) if details else None
+
+    # -- Not wired yet ------------------------------------------------------------
 
     async def get_orders(self, session: ShoppingSessionContext, limit: int = 5):
-        raise _not_wired("order history", "Phase 3")
+        raise _not_wired("order history", "after the member token")
 
     async def get_order(self, session: ShoppingSessionContext, order_id: str):
-        raise _not_wired("order history", "Phase 3")
+        raise _not_wired("order history", "after the member token")
 
     async def search_policies(self, session: ShoppingSessionContext, query: str):
-        raise _not_wired("policy library", "Phase 2")
+        raise _not_wired("policy library", "later")
 
     async def get_fulfillment_options(
         self, session: ShoppingSessionContext, product_ids: list[str]
     ):
-        raise _not_wired("fulfillment", "Phase 3")
+        raise _not_wired("fulfillment", "later")

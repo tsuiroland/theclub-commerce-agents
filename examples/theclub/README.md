@@ -1,10 +1,11 @@
 # The Club (`theclub.com.hk`) deployment example
 
-Status: **0.1, Phases 1 and 2a shipped** — the The Club agent config, a runnable
-console, the live read-only catalog over `shop.theclub.com.hk`'s Magento GraphQL, and
-Clubpoints pricing overlaid from The Club's AEM shopping pages, with points-budget
-search and demo member context. Cart, orders, policies, fulfillment, and the real
-member token (Phase 2b) are not wired yet.
+Status: **0.1, Phases 1, 2a, and 3 shipped** — the The Club agent config, a runnable
+console, the live catalog over `shop.theclub.com.hk`'s Magento GraphQL, Clubpoints
+pricing overlaid from The Club's AEM shopping pages with points-budget search and demo
+member context, and a real guest cart on the shop with a checkout handoff to the site
+itself. Orders, policies, fulfillment, and the real member token (Phase 2b) are not
+wired yet.
 
 The Club's transactional surface is `shop.theclub.com.hk` (Magento, GraphQL; the main
 site is an AEM content portal), selling in dual currencies — HKD cash and Clubpoints
@@ -17,13 +18,20 @@ and 繁體中文. The core repo is backend-agnostic; the work below is implement
 - `api/agent_config.py` — The Club identity: brand, bilingual points-first voice,
   dual-currency search guidance, Clubpoints/voucher/tier vocabulary in the policy
   grounding lexicon.
-- `api/magento_catalog.py` — `ClubMagentoCatalog`, a read-only `StorefrontBackend` over
-  the live `shop.theclub.com.hk` Magento GraphQL: text search, product details,
-  configurable families with variants, HKD cash prices. Anonymous GraphQL carries no
-  Clubpoints redemption price (member-gated in Magento), so pure-redemption items
-  (observed `CR-` SKU convention, HKD 0) carry a price note saying the points price
-  shows after member login. Every unwired system answers that it is temporarily
-  unavailable — its switch stays on per the backend contract.
+- `api/magento_catalog.py` — `ClubMagentoCatalog`, the `StorefrontBackend` over the live
+  `shop.theclub.com.hk` Magento GraphQL: text search, product details, configurable
+  families with variants, HKD cash prices, and (Phase 3) a real guest cart — add a
+  variant under its family (`parent_sku`), update, remove, all on the shop's own quote.
+  Anonymous GraphQL carries no Clubpoints redemption price (member-gated in Magento),
+  so pure-redemption items (observed `CR-` SKU convention, HKD 0) carry a price note
+  saying the points price shows after member login, and the cart refuses them rather
+  than stage a 0-priced line. `checkout` hands off to the site's sign-in page plus each
+  line's product page — the browser cannot resume this server-side quote, and the agent
+  never places an order. The shop's cart lines hide the child identity of a variant
+  (family sku only, no item-level sku, update/remove keyed by the base64-decoded quote
+  id), so the backend tracks which written id each line is. Every unwired system
+  answers that it is temporarily unavailable — its switch stays on per the backend
+  contract.
 - `api/aem_price_overlay.py` — `AemPriceOverlay`: the Clubpoints prices The Club's AEM
   shopping pages publish anonymously in their page models, indexed by sku (lazily
   loaded, per-page TTL, degraded gracefully when a page fails). The catalog merges a
@@ -45,7 +53,7 @@ and 繁體中文. The core repo is backend-agnostic; the work below is implement
 | 1 ✅ | Search + product details over Magento GraphQL (read-only; HKD pricing live, CP price member-gated) |
 | 2a ✅ | Clubpoints pricing via the AEM page-model overlay; points-budget search; demo member context (`CLUB_DEMO_TIER`, `CLUB_DEMO_CP`) |
 | 2b | The member token: real tier + CP balance from the member-gated Magento price and the loyalty service, replacing the overlay's stand-in and the demo knobs |
-| 3 | Cart + checkout handoff to Magento hosted checkout — never an autonomous purchase |
+| 3 ✅ | A real guest cart on the shop (add a variant under its family, update, remove), cash lines only — a Clubpoints redemption is refused for guests (its price is member-only) — and `checkout` hands off to the site's sign-in page plus each line's product page, never placing an order |
 | 4 | Points earn/convert advisory (HKT bills, Citi ThankYou, Shell/Esso, Marriott Bonvoy, KrisFlyer) |
 
 ## Watching it work
@@ -82,7 +90,12 @@ or the API alone, pointed at a storefront you run yourself:
     CLUB_AEM_MODELS=url1,url2 ...       # more AEM pages to price from
 
 `CLUB_DEMO_TIER`/`CLUB_DEMO_CP` stand in for the member experience while the Phase 2b
-token is outstanding.
+token is outstanding. In the chat, *"add the Clicks keyboard, Spice color"* writes the
+shop's real guest quote (watch the `theclub <- AddProductsToCart` trace), *"make it
+one"* and *"remove it"* update and remove it, and *"check out"* stages a summary whose
+buttons open the site — while a points redemption (*"redeem the Wellcome voucher"*) is
+answered with the honest member-only message. The console's own cart drawer still
+shows the mock fixtures; the live cart lives in the chat panel and the trace lines.
 
 ### A local LLM
 

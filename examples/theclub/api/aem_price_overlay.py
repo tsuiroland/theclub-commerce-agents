@@ -70,6 +70,7 @@ class Tile:
     sku: str
     name: str
     brand: str | None = None
+    url: str | None = None  # the product page on shop.theclub.com.hk
     image: str | None = None
     in_stock: bool = True
     clubpoints: float | None = None  # finalPrice.cp / minClubPoints
@@ -96,6 +97,7 @@ class Tile:
                     else None,
                 ),
                 ("vendor", self.vendor),
+                ("url", self.url),
                 ("catalog", self.rewards_or_shopping),
                 ("product_type", self.product_type),
                 ("earn_clubpoints", str(self.earn_clubpoints) if self.earn_clubpoints else None),
@@ -131,6 +133,8 @@ class Tile:
             attributes["catalog"] = self.rewards_or_shopping.lower()
         if self.vendor:
             attributes["vendor"] = self.vendor
+        if self.url:
+            attributes["url"] = self.url
         if self.earn_clubpoints:
             attributes["earn_clubpoints"] = str(self.earn_clubpoints)
         return attributes
@@ -152,6 +156,7 @@ def _tile(node: dict[str, Any]) -> Tile | None:
         sku=str(sku),
         name=str(node.get("name") or sku),
         brand=node.get("brandLabel"),
+        url=node.get("url"),
         image=node.get("cover") or node.get("thumbnail"),
         in_stock=bool(node.get("inStock", node.get("stockStatus") == "IN_STOCK")),
         clubpoints=_amount(final.get("cp")) or _amount(node.get("minClubPoints")),

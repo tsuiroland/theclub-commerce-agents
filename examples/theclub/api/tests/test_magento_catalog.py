@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 import pytest
 
-from shopping_agent import SearchFilters, ShoppingSessionContext
+from shopping_agent import SearchFilters, ShoppingSessionContext, Unavailable
 
 from ..aem_price_overlay import AemPriceOverlay
 from ..magento_catalog import ClubMagentoCatalog
@@ -239,10 +239,6 @@ async def test_unwired_systems_answer_unavailable(
     backend: ClubMagentoCatalog, session: ShoppingSessionContext
 ) -> None:
     with pytest.raises(RuntimeError):
-        await backend.get_cart(session)
-    with pytest.raises(RuntimeError):
-        await backend.add_to_cart(session, "NothingHP1", 1)
-    with pytest.raises(RuntimeError):
         await backend.get_orders(session)
     with pytest.raises(RuntimeError):
         await backend.search_policies(session, "refund")
@@ -391,3 +387,204 @@ async def test_demo_member_context() -> None:
         "clubpoints_balance": "10,000",
     }
     assert (await catalog.get_preferences(session)).loyalty_tier == "gold"
+
+
+# -- The Phase 3 cart: a stateful fake of the shop's guest-cart GraphQL --------------------
+
+from shopping_agent import Cart, CartItem  # noqa: E402
+
+
+class FakeClubShop:
+    """The guest-quote behavior the live endpoint showed: creates on demand, sells a
+    configurable's variant under its parent, prices a redemption at 0 for guests, and
+    takes update/remove as an input object keyed by the base64-decoded item id."""
+
+    def __init__(self) -> None:
+        self.cart_id: str | None = None
+        self.lines: list[dict] = []  # {uid, item_id, sku, quantity, price}
+        self.added: list[dict] = []
+        self.price_of = {"4188051": 368.0, "NothingHP1": 1799.0, "CR-WEL-100-26B5": 0.0}
+
+    @staticmethod
+    def _uid(item_id: int) -> str:
+        import base64
+
+        return base64.b64encode(str(item_id).encode()).decode()
+
+    def payload(self, request: httpx.Request) -> dict:
+        body = json.loads(request.content)
+        name, variables = body["operationName"], body.get("variables", {})
+        if name == "CreateEmptyCart":
+            self.cart_id = "guest-cart-1"
+            return {"data": {"createEmptyCart": self.cart_id}}
+        if name == "SearchProducts":
+            return SEARCH_RESPONSE
+        if name == "ProductDetail":
+            return DETAIL_RESPONSE
+        if name == "AddProductsToCart":
+            self.added.append(variables["items"][0])
+            for item in variables["items"]:
+                if item["sku"] not in self.price_of:
+                    return errors([f"{item['sku']}: not found"])
+                # The live shop labels a configurable line by its family, hiding the child.
+                self.lines.append(
+                    {
+                        "uid": self._uid(238796300 + len(self.lines)),
+                        "item_id": 238796300 + len(self.lines),
+                        "sku": item.get("parent_sku") or item["sku"],
+                        "quantity": item["quantity"],
+                        "price": self.price_of[item["sku"]],
+                    }
+                )
+            return {
+                "data": {"addProductsToCart": {"user_errors": [], "cart": {"total_quantity": 1}}}
+            }
+        if name == "UpdateCartItems":
+            for update in variables["input"]["cart_items"]:
+                for line in self.lines:
+                    if line["item_id"] == update["cart_item_id"]:
+                        line["quantity"] = update["quantity"]
+            return {"data": {"updateCartItems": {"cart": {"total_quantity": 1}}}}
+        if name == "RemoveItemFromCart":
+            removed = variables["input"]["cart_item_id"]
+            self.lines = [line for line in self.lines if line["item_id"] != removed]
+            return {"data": {"removeItemFromCart": {"cart": {"total_quantity": 0}}}}
+        if name == "Cart":
+            return {
+                "data": {
+                    "cart": {
+                        "total_quantity": len(self.lines),
+                        "prices": {"grand_total": {"value": 0, "currency": "HKD"}},
+                        "items": [
+                            {
+                                "uid": line["uid"],
+                                "product": {"sku": line["sku"], "name": f"Item {line['sku']}"},
+                                "quantity": line["quantity"],
+                                "prices": {
+                                    "price": {
+                                        "value": line["price"],
+                                        "currency": "HKD",
+                                    },
+                                    "row_total": {
+                                        "value": line["price"] * line["quantity"],
+                                        "currency": "HKD",
+                                    },
+                                },
+                            }
+                            for line in self.lines
+                        ],
+                    }
+                }
+            }
+        raise AssertionError(f"unexpected operation {name}")
+
+    def errors(self, messages: list[str]) -> dict:
+        return {
+            "data": {
+                "addProductsToCart": {
+                    "user_errors": [{"code": "UNDEFINED", "message": m} for m in messages],
+                    "cart": {"total_quantity": 0},
+                }
+            }
+        }
+
+
+def errors(messages):  # noqa: E306 - small helper the payload builder closes over
+    return {
+        "data": {
+            "addProductsToCart": {
+                "user_errors": [{"code": "UNDEFINED", "message": m} for m in messages],
+                "cart": {"total_quantity": 0},
+            }
+        }
+    }
+
+
+@pytest.fixture
+def shop() -> FakeClubShop:
+    return FakeClubShop()
+
+
+@pytest.fixture
+def store(shop: FakeClubShop) -> ClubMagentoCatalog:
+    return ClubMagentoCatalog(
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json=shop.payload(request))
+            )
+        )
+    )
+
+
+async def test_fresh_cart_is_empty_without_a_request(
+    store: ClubMagentoCatalog, shop: FakeClubShop, session: ShoppingSessionContext
+) -> None:
+    cart = await store.get_cart(session)
+    assert cart.items == []
+    assert shop.cart_id is None  # no guest quote is created until something is added
+
+
+async def test_add_variant_under_its_family(
+    store: ClubMagentoCatalog, shop: FakeClubShop, session: ShoppingSessionContext
+) -> None:
+    assert await store.get_product_details(session, "Clicks_16PM")
+    cart = await store.add_to_cart(session, "4188051", 2)
+    assert shop.added == [{"sku": "4188051", "quantity": 2, "parent_sku": "Clicks_16PM"}]
+    assert [(i.product_id, i.quantity, i.price) for i in cart.items] == [("4188051", 2, 368.0)]
+
+
+async def test_redemption_refused_for_guests(
+    store: ClubMagentoCatalog, shop: FakeClubShop, session: ShoppingSessionContext
+) -> None:
+    with pytest.raises(Unavailable) as refused:
+        await store.add_to_cart(session, "CR-WEL-100-26B5", 1)
+    assert "member-only" in str(refused.value)
+    assert shop.cart_id is None  # refused before any quote existed
+
+
+async def test_user_errors_become_unavailable(
+    store: ClubMagentoCatalog, session: ShoppingSessionContext
+) -> None:
+    with pytest.raises(Unavailable, match="not found"):
+        await store.add_to_cart(session, "GONE-SKU", 1)
+
+
+async def test_update_and_remove(
+    store: ClubMagentoCatalog, shop: FakeClubShop, session: ShoppingSessionContext
+) -> None:
+    await store.add_to_cart(session, "4188051", 2)
+    cart = await store.update_cart_item(session, "4188051", 1)
+    assert [(i.product_id, i.quantity) for i in cart.items] == [("4188051", 1)]
+    cart = await store.remove_from_cart(session, "4188051")
+    assert cart.items == []
+    assert shop.lines == []
+
+
+async def test_update_of_absent_line_leaves_cart(
+    store: ClubMagentoCatalog, shop: FakeClubShop, session: ShoppingSessionContext
+) -> None:
+    await store.add_to_cart(session, "NothingHP1", 1)
+    cart = await store.update_cart_item(session, "NOT-IN-CART", 3)
+    assert len(cart.items) == 1 and cart.items[0].quantity == 1
+
+
+async def test_checkout_hands_off_to_the_site(
+    store: ClubMagentoCatalog, session: ShoppingSessionContext
+) -> None:
+    assert await store.get_product_details(session, "Clicks_16PM")  # records the page url
+    cart = Cart(
+        items=[
+            CartItem(product_id="4188051", title="Clicks keyboard (Spice)", price=368.0, quantity=1)
+        ]
+    )
+    handoffs = await store.checkout_handoff(session, cart)
+    assert handoffs[0].url == "https://shop.theclub.com.hk/checkout/cart/"
+    urls = [handoff.url for handoff in handoffs[1:]]
+    assert "https://shop.theclub.com.hk/clicks-keyboard-iphone-16-pro-max" in urls
+    assert all(handoff.url.startswith("https://shop.theclub.com.hk/") for handoff in handoffs)
+
+
+async def test_checkout_handoff_empty_cart(
+    store: ClubMagentoCatalog, session: ShoppingSessionContext
+) -> None:
+    assert await store.checkout_handoff(session, Cart(currency="HKD")) == []
