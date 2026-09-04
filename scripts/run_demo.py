@@ -51,9 +51,14 @@ VERTICALS: dict[str, dict[str, object]] = {
     "travel": {"api_port": 8001, "store": "ACME Travel"},
     "telecom": {"api_port": 8002, "store": "ACME Mobile"},
     "entertainment": {"api_port": 8003, "store": "ACME Tickets"},
-    # The Club reuses ACME's storefront-web via a symlink until its own console lands;
+    # The Club serves ACME's storefront-web until its own console lands (a symlink
+    # would double-match the */storefront-web workspace glob and break npm ci);
     # its assistant reads the live catalog under CLUB_BACKEND=magento.
-    "theclub": {"api_port": 8004, "store": "The Club"},
+    "theclub": {
+        "api_port": 8004,
+        "store": "The Club",
+        "web_dir": "retail/storefront-web",
+    },
 }
 
 PYTHON_MODULES = (
@@ -273,7 +278,8 @@ def main() -> int:
 
     webs: list[tuple[str, Path, int]] = []
     if run_web and not args.merchant:
-        webs.append(("storefront", EXAMPLES_DIR / args.vertical / "storefront-web", web_port))
+        web_dir = str(config.get("web_dir") or f"{args.vertical}/storefront-web")
+        webs.append(("storefront", EXAMPLES_DIR / web_dir, web_port))
     if run_web and (args.merchant or args.all):
         webs.append(
             ("merchant portal", EXAMPLES_DIR / args.vertical / "merchant-web", web_port + 100)

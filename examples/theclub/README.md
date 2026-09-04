@@ -51,7 +51,7 @@ and 繁體中文. The core repo is backend-agnostic; the work below is implement
 ## Run
 
 Needs `ANTHROPIC_API_KEY` (the environment, repo-root `.env`, or `examples/retail/.env`).
-The one-command console (ACME's storefront-web via symlink on :3004, the API on :8004):
+The one-command console (ACME's storefront-web on :3004, the API on :8004):
 
     CLUB_BACKEND=magento CLUB_DEMO_TIER=gold CLUB_DEMO_CP=10000 \
       .venv/bin/python scripts/run_demo.py theclub
