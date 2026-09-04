@@ -1,6 +1,7 @@
 # The Club (`theclub.com.hk`) deployment example
 
-Status: **0.1, Phases 1, 2a, 2b, and 3 shipped** — the live catalog over
+Status: **0.2, Phases 1, 2a, 2b, and 3 shipped** (0.1 was the fork baseline and
+initial example scaffold, tagged `v0.1.0`) — the live catalog over
 `shop.theclub.com.hk`'s Magento GraphQL with Clubpoints pricing overlaid and
 points-budget search, the member's own Club account signed in through the shop's
 customer token, a real cart on the shop with a checkout handoff to the site itself,
@@ -15,7 +16,7 @@ site is an AEM content portal), selling in dual currencies — HKD cash and Club
 and 繁體中文. The core repo is backend-agnostic; the work below is implementing its
 `StorefrontBackend` over that surface.
 
-## What's in 0.1
+## What's in 0.2
 
 - `api/agent_config.py` — The Club identity: brand, bilingual points-first voice,
   dual-currency search guidance, Clubpoints/voucher/tier vocabulary in the policy
