@@ -59,6 +59,7 @@ VERTICALS: dict[str, dict[str, object]] = {
     "stores": {
         "api_port": 8005,
         "store": "The Club × HKTV Mall",
+        "app_module": "hktv.api.main",
         "web_dir": "theclub/storefront-web",
     },
 }
@@ -181,7 +182,9 @@ def start_api(vertical: str, port: int, federated: bool) -> subprocess.Popen:
     env = os.environ.copy()
     if federated:
         env["COMMERCE_DEMO_AUTH"] = "sdk"
-    module = f"{vertical}.api.main:app"
+    # A vertical whose package is named differently than the vertical itself (the
+    # stores vertical lives in the hktv package) overrides the module.
+    module = str(VERTICALS[vertical].get("app_module") or f"{vertical}.api.main") + ":app"
     command = [
         sys.executable,
         "-m",
