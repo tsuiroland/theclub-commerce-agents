@@ -138,7 +138,9 @@ balance only while signed out.
 `CLUB_LLM_BASE_URL` points the assistant at a local endpoint that speaks the Anthropic
 Messages protocol (`/v1/messages`, streaming, tool use, thinking — vLLM and LM Studio
 style gateways expose it); key-less servers take a stand-in key. `CLUB_LLM_MODEL` names
-the model the endpoint serves, so the config requests it. The turn loop is chatty — a
+the model the endpoint serves, so the config requests it; the post-turn memory pass runs
+on the same model unless `CLUB_LLM_MEMORY_MODEL` names another one the endpoint serves.
+The turn loop is chatty — a
 ~20KB system prompt, 21 tools, thinking per round — so expect the first budget question
 to take a while on smaller local deployments; a mid-size reasoning model handles the
 tool loop, and smaller ones may need `thinking_effort=None` (`CLUB_LLM_THINKING=0`) or a

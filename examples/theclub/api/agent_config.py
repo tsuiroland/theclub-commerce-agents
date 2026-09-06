@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 
+from commerce_common.config import DEFAULT_MEMORY_MODEL
 from shopping_agent import ShoppingAgentConfig
 
 from .earn_rates import rates_notes
@@ -59,10 +60,17 @@ def build_shopping_config() -> ShoppingAgentConfig:
     # CLUB_LLM_MODEL names the model a local Anthropic-protocol endpoint serves (see
     # main.py's CLUB_LLM_BASE_URL); without it, the Anthropic default the config names.
     # CLUB_LLM_THINKING=0 disables thinking for endpoints whose reasoning traces cost
-    # more latency than they buy accuracy on this tool loop.
+    # more latency than they buy accuracy on this tool loop. A local endpoint serves
+    # only its own model ids, so the memory pass follows the turn model unless
+    # CLUB_LLM_MEMORY_MODEL names a lighter one the endpoint also serves.
     thinking = None if os.environ.get("CLUB_LLM_THINKING") == "0" else "low"
     return ShoppingAgentConfig(
         model=os.environ.get("CLUB_LLM_MODEL") or "claude-sonnet-5",
+        memory_model=(
+            os.environ.get("CLUB_LLM_MEMORY_MODEL")
+            or os.environ.get("CLUB_LLM_MODEL")
+            or DEFAULT_MEMORY_MODEL
+        ),
         thinking_effort=thinking,
         brand_name="The Club",
         assistant_name="the Club shopping assistant",
