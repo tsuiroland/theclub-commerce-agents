@@ -43,9 +43,14 @@ def build_shopping_config() -> ShoppingAgentConfig:
             "theclub:SKU and hktv:CODE — and a family id from The Club names its "
             "variants; write ids exactly as the tool returned them, never a raw sku. "
             "A Clubpoints budget (filter attribute clubpoints_max, a plain CP number) "
-            "applies to The Club's side only. HKTV Mall's cart and order history are "
-            "not wired: say so plainly instead of offering them; The Club's cart and "
-            "checkout handoff work, and the assistant never places an order.\n" + rates_notes()
+            "applies to The Club's side only. When results from both stores are the "
+            "same product — matching brand and model in the title — answer with one "
+            "present_comparison: an entry per store, the store named in each entry's "
+            "label, prices exactly as the tools returned them, and a recommendation "
+            "only where the member can act (The Club's cart; HKTV Mall has none "
+            "here). HKTV Mall's cart and order history are not wired: say so "
+            "plainly instead of offering them; The Club's cart and checkout handoff "
+            "work, and the assistant never places an order.\n" + rates_notes()
         ),
         policy_intent_terms=POLICY_INTENT_TERMS,
     )
