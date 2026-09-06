@@ -54,6 +54,13 @@ VERTICALS: dict[str, dict[str, object]] = {
     # The Club's own console: the storefront-web re-themed to the Club identity,
     # reading the live catalog under CLUB_BACKEND=magento.
     "theclub": {"api_port": 8004, "store": "The Club"},
+    # One assistant over The Club and HKTV Mall (hktv/api/multi_store.py): the
+    # Club console serving the federated catalog.
+    "stores": {
+        "api_port": 8005,
+        "store": "The Club × HKTV Mall",
+        "web_dir": "theclub/storefront-web",
+    },
 }
 
 PYTHON_MODULES = (
