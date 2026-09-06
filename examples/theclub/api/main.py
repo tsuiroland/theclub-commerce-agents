@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from anthropic import AsyncAnthropic
 from fastapi import FastAPI
@@ -28,8 +28,8 @@ from demo_common import REPO_ROOT, MemorySeeder, build_storefront_host, load_dem
 from retail.api.mock_retail import DATA_DIR, MockRetail
 from shopping_agent_runtime import ShoppingAgent
 
-from .agent_config import build_shopping_config
 from .aem_price_overlay import DEFAULT_MODEL_URLS, AemPriceOverlay
+from .agent_config import build_shopping_config
 from .live_storefront import LiveClubStorefront
 from .magento_catalog import DEFAULT_GRAPHQL_URL, DEFAULT_STORE
 

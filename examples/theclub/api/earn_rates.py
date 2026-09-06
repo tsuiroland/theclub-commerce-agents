@@ -85,8 +85,14 @@ def rates_notes() -> str:
         "from these, citing the page; when a rate is not listed here, say so and "
         "point to the member's own account pages rather than guessing):"
     ]
-    lines += [f"- {r.partner}: {r.rate} [{PORTAL}{r.source_path}, checked {r.checked}]" for r in EARN_RATES]
-    lines += [f"- {r.partner}: {r.rate} [{PORTAL}{r.source_path}, checked {r.checked}]" for r in CONVERSION_RATES]
+    lines += [
+        f"- {r.partner}: {r.rate} [{PORTAL}{r.source_path}, checked {r.checked}]"
+        for r in EARN_RATES
+    ]
+    lines += [
+        f"- {r.partner}: {r.rate} [{PORTAL}{r.source_path}, checked {r.checked}]"
+        for r in CONVERSION_RATES
+    ]
     lines.append(
         "Conversions themselves run on the signed-in portal "
         f"({PORTAL}/en/my-account/manage-my-clubpoint/convert-to-clubpoints.html); "

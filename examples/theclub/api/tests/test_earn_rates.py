@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-from ..earn_rates import PORTAL, CONVERSION_RATES, EARN_RATES, _rate_lines, rates_notes
+from ..earn_rates import CONVERSION_RATES, EARN_RATES, PORTAL, _rate_lines, rates_notes
 
 
 def test_every_rate_cites_its_page_and_check_date() -> None:
@@ -32,9 +32,7 @@ def test_rates_notes_carry_rates_and_sources() -> None:
 
 
 def test_rate_lines_extracts_points_prose_and_the_icon_placeholder() -> None:
-    model = {
-        "text": "<b>270 Citi Points &#61; 1 Clubpoint</b>. Earn :P:5 per HK$100 of spend."
-    }
+    model = {"text": "<b>270 Citi Points &#61; 1 Clubpoint</b>. Earn :P:5 per HK$100 of spend."}
     lines = _rate_lines(model)
     assert any("270" in line for line in lines)
     assert any("HK$100" in line for line in lines)
