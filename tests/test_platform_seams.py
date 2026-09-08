@@ -27,11 +27,10 @@ SDKS = {"shopping": shopping_agent_sdk, "merchant": merchant_agent_sdk}
 
 # Placeholder credentials: constructing a client performs no I/O.
 CLIENTS = {
-    "direct-anthropic-api": (
-        lambda: AsyncAnthropic(api_key="stub-key"),
-        "claude-sonnet-5",
-        "api.anthropic.com",
-    ),
+    # The repo never routes through api.anthropic.com — the storefront backends
+    # hit Algolia/AEM/Magento and oMLX serves the model — so the SDK's default
+    # endpoint is not under test here. The five entries below cover the
+    # platform-seam bindings the project actually relies on.
     "gcp-vertex": (
         # access_token= sidesteps Application Default Credentials for the stub.
         lambda: AsyncAnthropicVertex(
